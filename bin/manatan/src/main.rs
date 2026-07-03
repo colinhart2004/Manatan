@@ -18,8 +18,11 @@ use std::{
 use anyhow::anyhow;
 use axum::{
     Router,
-    http::{StatusCode, Uri},
-    response::IntoResponse,
+    body::{Body, to_bytes},
+    extract::Request,
+    http::{HeaderMap, HeaderValue, StatusCode, Uri, header},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::any,
 };
 use clap::Parser;
@@ -32,7 +35,7 @@ use manatan_server_public::{
     app::build_router_without_cors, build_state, config::Config as ManatanServerConfig,
 };
 use reqwest::{
-    Client, Method,
+    Client, Method, Url,
     header::{
         ACCEPT, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_ORIGIN,
         ACCESS_CONTROL_REQUEST_METHOD, AUTHORIZATION, CONTENT_TYPE, ORIGIN,
@@ -60,6 +63,7 @@ const BIN_NAME: &str = "manatan";
 const SUWAYOMI_HOST: &str = "127.0.0.1";
 const SUWAYOMI_PORT: u16 = 4566;
 const SUWAYOMI_HTTP_BASE_URL: &str = "http://127.0.0.1:4566";
+const MAX_PAGES_RESPONSE_REWRITE_BYTES: usize = 2 * 1024 * 1024;
 
 static ICON_BYTES: &[u8] = include_bytes!("../resources/faviconlogo.png");
 static JAR_BYTES: &[u8] = include_bytes!("../resources/Suwayomi-Server.jar");
@@ -1177,7 +1181,8 @@ async fn run_server(
     ensure_runtime_bridge_available(&manatan_runtime_url)
         .await
         .map_err(|err| anyhow!("Failed runtime bridge preflight: {err}"))?;
-    let manatan_router = build_router_without_cors(manatan_state);
+    let manatan_router = build_router_without_cors(manatan_state)
+        .layer(middleware::from_fn(rewrite_manga_pages_response));
 
     info!("🌍 Starting Web Interface at http://{}:{}", host, port);
 
@@ -1185,7 +1190,8 @@ async fn run_server(
     let yomitan_router = manatan_yomitan_server::create_router(data_dir.clone());
     let audio_router = manatan_audio_server::create_router(data_dir.clone());
     let sync_router = manatan_sync_server::create_router(data_dir.clone());
-    let novel_router = manatan_novel_server::create_router(data_dir.clone(), PathBuf::from(local_novel_path_str));
+    let novel_router =
+        manatan_novel_server::create_router(data_dir.clone(), PathBuf::from(local_novel_path_str));
     let system_router = Router::new().route("/version", any(current_version_handler));
 
     let cors = CorsLayer::new()
@@ -1275,6 +1281,338 @@ async fn serve_react_app(uri: Uri) -> impl IntoResponse {
     }
 
     (StatusCode::NOT_FOUND, "404 - Index.html missing").into_response()
+}
+
+async fn rewrite_manga_pages_response(req: Request, next: Next) -> Response {
+    let path = req.uri().path().to_string();
+    if !is_manga_pages_path(&path) {
+        return next.run(req).await;
+    }
+
+    let public_base_url = public_base_url_from_request(req.headers(), req.uri());
+    let response = next.run(req).await;
+
+    let Some(public_base_url) = public_base_url else {
+        return response;
+    };
+    if !response.status().is_success() || !is_json_response(response.headers()) {
+        return response;
+    }
+
+    let (mut parts, body) = response.into_parts();
+    let body_bytes = match to_bytes(body, MAX_PAGES_RESPONSE_REWRITE_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            warn!("failed to buffer manga pages response for URL rewrite: {err}");
+            return Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .body(Body::empty())
+                .unwrap_or_else(|_| Response::new(Body::empty()));
+        }
+    };
+
+    let Some(rewritten_body) = rewrite_manga_pages_body(&body_bytes, &public_base_url) else {
+        return Response::from_parts(parts, Body::from(body_bytes));
+    };
+
+    parts.headers.remove(header::CONTENT_LENGTH);
+    parts.headers.remove(header::TRANSFER_ENCODING);
+    parts.headers.remove(header::CONTENT_ENCODING);
+    parts.headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+
+    Response::from_parts(parts, Body::from(rewritten_body))
+}
+
+fn is_json_response(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_ascii_lowercase().contains("application/json"))
+        .unwrap_or(false)
+}
+
+fn rewrite_manga_pages_body(body: &[u8], public_base_url: &str) -> Option<Vec<u8>> {
+    let mut value = serde_json::from_slice::<serde_json::Value>(body).ok()?;
+    let pages = value.get_mut("pages")?.as_array_mut()?;
+    let mut changed = false;
+
+    for page in pages {
+        let Some(raw_url) = page.as_str() else {
+            continue;
+        };
+        let Some(rewritten_url) = rewrite_manga_page_url(raw_url, public_base_url) else {
+            continue;
+        };
+        if rewritten_url != raw_url {
+            *page = serde_json::Value::String(rewritten_url);
+            changed = true;
+        }
+    }
+
+    changed.then(|| serde_json::to_vec(&value).ok()).flatten()
+}
+
+fn rewrite_manga_page_url(raw_url: &str, public_base_url: &str) -> Option<String> {
+    if raw_url.starts_with('/') {
+        return is_manga_page_path(raw_url).then(|| absolute_public_url(public_base_url, raw_url));
+    }
+
+    let parsed = Url::parse(raw_url).ok()?;
+    let host = parsed.host_str()?;
+    if !is_loopback_or_unspecified_host(host) || !is_manga_page_path(parsed.path()) {
+        return None;
+    }
+
+    let mut path_and_query = parsed.path().to_string();
+    if let Some(query) = parsed.query() {
+        path_and_query.push('?');
+        path_and_query.push_str(query);
+    }
+
+    Some(absolute_public_url(public_base_url, &path_and_query))
+}
+
+fn absolute_public_url(public_base_url: &str, path_and_query: &str) -> String {
+    let base = public_base_url.trim_end_matches('/');
+    if path_and_query.starts_with('/') {
+        format!("{base}{path_and_query}")
+    } else {
+        format!("{base}/{path_and_query}")
+    }
+}
+
+fn is_manga_pages_path(path: &str) -> bool {
+    let mut segments = path.trim_start_matches('/').split('/');
+    matches!(
+        (
+            segments.next(),
+            segments.next(),
+            segments.next(),
+            segments.next(),
+            segments.next(),
+            segments.next(),
+            segments.next(),
+            segments.next(),
+        ),
+        (
+            Some("api"),
+            Some("v1"),
+            Some("manga"),
+            Some(_),
+            Some("chapter"),
+            Some(_),
+            Some("pages"),
+            None,
+        )
+    )
+}
+
+fn is_manga_page_path(path: &str) -> bool {
+    let mut segments = path.trim_start_matches('/').split('/');
+    matches!(
+        (
+            segments.next(),
+            segments.next(),
+            segments.next(),
+            segments.next(),
+            segments.next(),
+            segments.next(),
+            segments.next(),
+            segments.next(),
+            segments.next(),
+        ),
+        (
+            Some("api"),
+            Some("v1"),
+            Some("manga"),
+            Some(_),
+            Some("chapter"),
+            Some(_),
+            Some("page"),
+            Some(_),
+            None,
+        )
+    )
+}
+
+fn is_loopback_or_unspecified_host(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "::1" | "0.0.0.0")
+}
+
+fn public_base_url_from_request(headers: &HeaderMap, uri: &Uri) -> Option<String> {
+    let scheme = forwarded_proto(headers)
+        .or_else(|| first_header_part(headers, "x-forwarded-proto"))
+        .or_else(|| uri.scheme_str().map(str::to_string))
+        .unwrap_or_else(|| "http".to_string());
+    let scheme = match scheme.as_str() {
+        "http" | "https" => scheme,
+        _ => "http".to_string(),
+    };
+
+    let host = forwarded_host(headers)
+        .or_else(|| first_header_part(headers, "x-forwarded-host"))
+        .or_else(|| header_value(headers, header::HOST.as_str()))
+        .or_else(|| {
+            uri.authority()
+                .map(|authority| authority.as_str().to_string())
+        })?;
+
+    Some(format!("{scheme}://{host}"))
+}
+
+fn forwarded_proto(headers: &HeaderMap) -> Option<String> {
+    forwarded_param(headers, "proto")
+}
+
+fn forwarded_host(headers: &HeaderMap) -> Option<String> {
+    forwarded_param(headers, "host")
+}
+
+fn forwarded_param(headers: &HeaderMap, name: &str) -> Option<String> {
+    let value = header_value(headers, "forwarded")?;
+    let first_forwarded = value.split(',').next()?;
+    first_forwarded.split(';').find_map(|part| {
+        let (key, value) = part.trim().split_once('=')?;
+        key.eq_ignore_ascii_case(name)
+            .then(|| value.trim_matches('"').to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn first_header_part(headers: &HeaderMap, name: &str) -> Option<String> {
+    header_value(headers, name)?
+        .split(',')
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rewrites_loopback_manga_page_urls_to_request_origin() {
+        let body = br#"{"pages":["http://127.0.0.1:4568/api/v1/manga/1/chapter/2/page/0","http://localhost:4568/api/v1/manga/1/chapter/2/page/1?cache=true"]}"#;
+
+        let rewritten = rewrite_manga_pages_body(body, "http://203.0.113.10:4567").unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
+
+        assert_eq!(
+            value["pages"][0],
+            "http://203.0.113.10:4567/api/v1/manga/1/chapter/2/page/0"
+        );
+        assert_eq!(
+            value["pages"][1],
+            "http://203.0.113.10:4567/api/v1/manga/1/chapter/2/page/1?cache=true"
+        );
+    }
+
+    #[test]
+    fn rewrites_relative_manga_page_urls_to_request_origin() {
+        let body = br#"{"pages":["/api/v1/manga/1/chapter/2/page/0"]}"#;
+
+        let rewritten = rewrite_manga_pages_body(body, "http://localhost:4568").unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
+
+        assert_eq!(
+            value["pages"][0],
+            "http://localhost:4568/api/v1/manga/1/chapter/2/page/0"
+        );
+    }
+
+    #[test]
+    fn leaves_non_loopback_and_non_page_urls_unchanged() {
+        let body = br#"{"pages":["https://cdn.example.test/api/v1/manga/1/chapter/2/page/0","http://127.0.0.1:4568/api/v1/manga/1/chapter/2/thumbnail"]}"#;
+
+        assert!(rewrite_manga_pages_body(body, "http://203.0.113.10:4567").is_none());
+    }
+
+    #[test]
+    fn derives_public_base_url_from_host_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("203.0.113.10:4567"));
+
+        let base_url = public_base_url_from_request(
+            &headers,
+            &Uri::from_static("/api/v1/manga/1/chapter/2/pages"),
+        );
+
+        assert_eq!(base_url.as_deref(), Some("http://203.0.113.10:4567"));
+    }
+
+    #[test]
+    fn derives_public_base_url_from_x_forwarded_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:4568"));
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        headers.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("reader.example.test"),
+        );
+
+        let base_url = public_base_url_from_request(
+            &headers,
+            &Uri::from_static("/api/v1/manga/1/chapter/2/pages"),
+        );
+
+        assert_eq!(base_url.as_deref(), Some("https://reader.example.test"));
+    }
+
+    #[test]
+    fn forwarded_header_takes_priority() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:4568"));
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("http"));
+        headers.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("ignored.example.test"),
+        );
+        headers.insert(
+            "forwarded",
+            HeaderValue::from_static("for=192.0.2.1;proto=https;host=\"reader.example.test:8443\""),
+        );
+
+        let base_url = public_base_url_from_request(
+            &headers,
+            &Uri::from_static("/api/v1/manga/1/chapter/2/pages"),
+        );
+
+        assert_eq!(
+            base_url.as_deref(),
+            Some("https://reader.example.test:8443")
+        );
+    }
+
+    #[test]
+    fn matches_only_page_list_endpoint_for_response_rewrite() {
+        assert!(is_manga_pages_path("/api/v1/manga/1/chapter/2/pages"));
+        assert!(!is_manga_pages_path("/api/v1/manga/1/chapter/2/pages/0"));
+        assert!(!is_manga_pages_path("/api/v1/manga/1/chapter/2/page/0"));
+    }
+
+    #[test]
+    fn matches_page_image_endpoint_for_url_rewrite() {
+        assert!(is_manga_page_path("/api/v1/manga/1/chapter/2/page/0"));
+        assert!(!is_manga_page_path("/api/v1/manga/1/chapter/2/page"));
+        assert!(!is_manga_page_path(
+            "/api/v1/manga/1/chapter/2/page/0/extra"
+        ));
+        assert!(!is_manga_page_path("/api/v1/manga/1/chapter/2/pages"));
+    }
 }
 
 fn ensure_suwayomi_port_available(host: &str, port: u16) -> anyhow::Result<()> {

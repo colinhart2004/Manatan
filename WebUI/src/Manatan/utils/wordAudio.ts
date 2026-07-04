@@ -3,11 +3,11 @@ import { apiRequest } from '@/Manatan/utils/api';
 import { resolveFirstAvailableWordAudioSource } from '@/Manatan/utils/wordAudioSourceResolver';
 
 const WORD_AUDIO_SOURCE_LABELS: Record<WordAudioSource, string> = {
-    'jpod101': 'JapanesePod101',
+    jpod101: 'JapanesePod101',
     'language-pod-101': 'LanguagePod101',
-    'jisho': 'Jisho',
+    jisho: 'Jisho',
     'lingua-libre': 'Lingua Libre',
-    'wiktionary': 'Wiktionary',
+    wiktionary: 'Wiktionary',
 };
 
 const audioUrlCache = new Map<string, Promise<string | null>>();
@@ -33,7 +33,6 @@ const getAudioUrlFromServer = async (
     return response?.url ?? null;
 };
 
-
 const getAudioUrlForSource = async (
     source: WordAudioSource,
     term: string,
@@ -53,7 +52,7 @@ const getAudioUrlForSource = async (
                 case 'jisho':
                 case 'lingua-libre':
                 case 'wiktionary':
-                    return getAudioUrlFromServer(source, term, reading, language);
+                    return await getAudioUrlFromServer(source, term, reading, language);
                 default:
                     return null;
             }
@@ -162,13 +161,9 @@ export const resolveWordAudioUrl = async (
     const term = entry.headword || '';
     const reading = entry.reading || '';
     const sources = selection === 'auto' ? getWordAudioSourceOptions(language) : [selection];
-    for (const source of sources) {
-        const url = await getAudioUrlForSource(source, term, reading, language);
-        if (url) {
-            return { source, url };
-        }
-    }
-    return null;
+    return resolveFirstAvailableWordAudioSource(sources, (source) =>
+        getAudioUrlForSource(source, term, reading, language),
+    );
 };
 
 export const playWordAudio = async (
@@ -179,18 +174,15 @@ export const playWordAudio = async (
     const term = entry.headword || '';
     const reading = entry.reading || '';
     const sources = selection === 'auto' ? getWordAudioSourceOptions(language) : [selection];
-    for (const source of sources) {
+    const playable = await resolveFirstAvailableWordAudioSource(sources, async (source) => {
         const url = await getAudioUrlForSource(source, term, reading, language);
         if (!url) {
-            continue;
+            return null;
         }
-        const fallbackPlayed = await tryPlayAudioUrl(fallbackUrl);
-        if (fallbackPlayed) {
-            return fallbackSource;
-        }
-    }
+        return (await tryPlayAudioUrl(url)) ? url : null;
+    });
 
-    return null;
+    return playable?.source ?? null;
 };
 
 export const getWordAudioFilename = (url: string): string => {

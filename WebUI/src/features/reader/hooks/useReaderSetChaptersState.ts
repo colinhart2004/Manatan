@@ -42,7 +42,7 @@ export const useReaderSetChaptersState = (
     useEffect(() => {
         const newMangaChapters = chaptersResponse.data?.chapters.nodes;
         const newCurrentChapter = newMangaChapters
-            ? (newMangaChapters[newMangaChapters.length - chapterSourceOrder] ?? null)
+            ? (newMangaChapters.find((chapter) => chapter.sourceOrder === chapterSourceOrder) ?? null)
             : undefined;
         const newInitialChapter = finalInitialChapter ?? newCurrentChapter;
         const newChapterForDuplicatesHandling = chapterForDuplicatesHandling ?? newCurrentChapter;

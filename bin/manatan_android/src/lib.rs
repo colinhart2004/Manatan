@@ -402,7 +402,8 @@ fn prepare_shared_local_media_dirs(
     // Prefer shared external storage so users can manage files directly.
     let shared_root = resolve_manatan_shared_root_with_migration(app);
 
-    let (local_manga_dir, local_anime_dir, local_novel_dir) = if let Some(shared_root) = shared_root {
+    let (local_manga_dir, local_anime_dir, local_novel_dir) = if let Some(shared_root) = shared_root
+    {
         (
             shared_root.join("local-manga"),
             shared_root.join("local-anime"),
@@ -1240,7 +1241,10 @@ async fn start_web_server(
     let manatan_state = build_state(manatan_config).await?;
     let manatan_router = build_router_without_cors(manatan_state);
     let sync_router = manatan_sync_server::create_router(data_dir.clone());
-    let novel_router = manatan_novel_server::create_router(data_dir.clone(), PathBuf::from(local_novel_path.clone()));
+    let novel_router = manatan_novel_server::create_router(
+        data_dir.clone(),
+        PathBuf::from(local_novel_path.clone()),
+    );
 
     let ocr_router = manatan_ocr_server::create_router(data_dir.clone());
     let yomitan_router = manatan_yomitan_server::create_router(data_dir.clone());

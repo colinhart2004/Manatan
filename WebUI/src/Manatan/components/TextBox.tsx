@@ -67,10 +67,14 @@ export const TextBox: React.FC<{
     const longPressTimer = useRef<number | null>(null);
     const longPressTriggered = useRef(false);
     const touchStartPoint = useRef<{ x: number; y: number } | null>(null);
+    const touchMoved = useRef(false);
+    const lastTouchLookupAt = useRef(0);
 
     const justActivated = useRef(false);
     const dictPopupRef = useRef(dictPopup.visible);
     useEffect(() => { dictPopupRef.current = dictPopup.visible; }, [dictPopup.visible]);
+    const hasTouchInput = typeof navigator !== 'undefined' && (navigator.maxTouchPoints || 0) > 0;
+    const touchModeEnabled = settings.mobileMode || hasTouchInput;
 
     const closeContextMenu = useCallback(() => setContextMenu(null), []);
 
@@ -214,7 +218,7 @@ export const TextBox: React.FC<{
     }, [dictPopup.visible, dictPopup.highlight, imgSrc, index, displayContent, isActive]);
 
     useEffect(() => {
-        if (!isActive || !settings.mobileMode) return;
+        if (!isActive || !touchModeEnabled) return;
         
         const handleGlobalClick = (e: MouseEvent | TouchEvent) => {
             const target = e.target as Element;
@@ -234,16 +238,16 @@ export const TextBox: React.FC<{
             document.removeEventListener('touchstart', handleGlobalClick);
             document.removeEventListener('mousedown', handleGlobalClick);
         };
-    }, [isActive, settings.mobileMode, wasPopupClosedRecently]);
+    }, [isActive, touchModeEnabled, wasPopupClosedRecently]);
 
     useEffect(() => {
-        if (!isActive && !isEditing && settings.mobileMode) {
+        if (!isActive && !isEditing && touchModeEnabled) {
              const raw = ref.current?.innerText || '';
              if (raw !== displayContent) {
                  onUpdate(index, raw.replace(/\n/g, '\u200B'));
              }
         }
-    }, [isActive, isEditing, settings.mobileMode, index, onUpdate, displayContent]);
+    }, [isActive, isEditing, touchModeEnabled, index, onUpdate, displayContent]);
 
     const getTargetField = useCallback((type: 'Image' | 'Sentence') => {
         if (settings.ankiFieldMap) {
@@ -429,11 +433,161 @@ export const TextBox: React.FC<{
         }
     };
 
+    const getTextNode = useCallback((): Text | null => {
+        if (!ref.current) return null;
+        const walker = document.createTreeWalker(ref.current, NodeFilter.SHOW_TEXT);
+        return walker.nextNode() as Text | null;
+    }, []);
+
+    const getRangeRects = useCallback((startChar: number, length: number) => {
+        const node = getTextNode();
+        const textLength = node?.textContent?.length || 0;
+        if (!node || textLength === 0) return [];
+
+        const start = Math.max(0, Math.min(startChar, textLength - 1));
+        const end = Math.max(start + 1, Math.min(start + Math.max(1, length), textLength));
+        const range = document.createRange();
+        range.setStart(node, start);
+        range.setEnd(node, end);
+
+        return Array.from(range.getClientRects())
+            .filter((rect) => rect.width > 0 && rect.height > 0)
+            .map((rect) => ({
+                x: rect.left,
+                y: rect.top,
+                width: rect.width,
+                height: rect.height,
+            }));
+    }, [getTextNode]);
+
+    const getCharOffsetAtPoint = useCallback((clientX: number, clientY: number) => {
+        let targetNode: Node | null = null;
+        let charOffset = 0;
+
+        if (document.caretRangeFromPoint) {
+            const range = document.caretRangeFromPoint(clientX, clientY);
+            if (range && range.startContainer.nodeType === Node.TEXT_NODE) {
+                targetNode = range.startContainer;
+                charOffset = range.startOffset;
+            }
+        } else if ((document as any).caretPositionFromPoint) {
+            const pos = (document as any).caretPositionFromPoint(clientX, clientY);
+            if (pos && pos.offsetNode.nodeType === Node.TEXT_NODE) {
+                targetNode = pos.offsetNode;
+                charOffset = pos.offset;
+            }
+        }
+
+        if (!targetNode || !ref.current?.contains(targetNode)) {
+            return 0;
+        }
+
+        const textLength = targetNode.textContent?.length || 0;
+        if (textLength === 0) return 0;
+
+        if (charOffset > 0) {
+            const checkRange = document.createRange();
+            checkRange.setStart(targetNode, charOffset - 1);
+            checkRange.setEnd(targetNode, charOffset);
+            const rect = checkRange.getBoundingClientRect();
+
+            if (
+                clientX >= rect.left &&
+                clientX <= rect.right &&
+                clientY >= rect.top &&
+                clientY <= rect.bottom
+            ) {
+                charOffset -= 1;
+            }
+        }
+
+        return Math.max(0, Math.min(charOffset, textLength - 1));
+    }, []);
+
+    const openDictionaryLookup = useCallback(async (clientX: number, clientY: number) => {
+        if (!settings.enableYomitan) return;
+
+        const charOffset = getCharOffsetAtPoint(clientX, clientY);
+        const rawContent = displayContent;
+        const cleanContent = rawContent.replace(/[\u200B\n\r]+/g, '');
+        if (!cleanContent.trim()) return;
+
+        const encoder = new TextEncoder();
+        const prefix = rawContent.substring(0, charOffset);
+        const ignoredLength = (prefix.match(/[\u200B\n\r]/g) || []).length;
+        const adjustedOffset = Math.max(0, charOffset - ignoredLength);
+        const byteIndex = encoder.encode(cleanContent.substring(0, adjustedOffset)).length;
+
+        const initialRects = getRangeRects(charOffset, 1);
+
+        setDictPopup({
+            visible: true,
+            x: clientX,
+            y: clientY,
+            results: [],
+            kanjiResults: [],
+            isLoading: true,
+            systemLoading: false,
+            highlight: {
+                imgSrc,
+                index,
+                startChar: charOffset,
+                length: 1,
+                rects: initialRects.length ? initialRects : undefined,
+            },
+            context: { imgSrc, sentence: cleanContent, spreadData }
+        });
+
+        const results = await lookupYomitan(
+            cleanContent,
+            byteIndex,
+            settings.resultGroupingMode,
+            settings.yomitanLanguage
+        );
+
+        const loadedResults = results === 'loading' ? [] : ((results as any).terms || results || []);
+        const loadedKanji = results === 'loading' ? [] : ((results as any).kanji || []);
+
+        if (results === 'loading') {
+            setDictPopup(prev => ({ ...prev, results: [], kanjiResults: [], isLoading: false, systemLoading: true }));
+            return;
+        }
+
+        const matchLength = (loadedResults && loadedResults[0]?.matchLen) || 1;
+        const highlightRects = getRangeRects(charOffset, matchLength);
+        setDictPopup(prev => ({
+            ...prev,
+            results: loadedResults,
+            kanjiResults: loadedKanji,
+            isLoading: false,
+            systemLoading: false,
+            highlight: {
+                imgSrc,
+                index,
+                startChar: charOffset,
+                length: matchLength,
+                rects: highlightRects.length ? highlightRects : prev.highlight?.rects,
+            }
+        }));
+    }, [
+        displayContent,
+        getCharOffsetAtPoint,
+        getRangeRects,
+        imgSrc,
+        index,
+        setDictPopup,
+        settings.enableYomitan,
+        settings.resultGroupingMode,
+        settings.yomitanLanguage,
+        spreadData,
+    ]);
+
     const handleTouchStart = (e: React.TouchEvent) => {
-        if (!settings.mobileMode) return;
+        if (!touchModeEnabled) return;
         const touch = e.touches[0];
         if (!touch) return;
         touchStartPoint.current = { x: touch.clientX, y: touch.clientY };
+        touchMoved.current = false;
         longPressTriggered.current = false;
         clearLongPressTimer();
         longPressTimer.current = window.setTimeout(() => {
@@ -452,12 +606,11 @@ export const TextBox: React.FC<{
             setTimeout(() => {
                 justActivated.current = false;
             }, 500);
-            if (e.cancelable) e.preventDefault();
         }
     };
 
     const handleTouchMove = (e: React.TouchEvent) => {
-        if (!settings.mobileMode || !touchStartPoint.current) return;
+        if (!touchModeEnabled || !touchStartPoint.current) return;
         const touch = e.touches[0];
         if (!touch) return;
         const dx = touch.clientX - touchStartPoint.current.x;
@@ -465,18 +618,30 @@ export const TextBox: React.FC<{
         if (Math.hypot(dx, dy) > 12) {
             clearLongPressTimer();
             touchStartPoint.current = null;
+            touchMoved.current = true;
             longPressTriggered.current = false;
         }
     };
 
     const handleTouchEnd = (e: React.TouchEvent) => {
-        if (!settings.mobileMode) return;
+        if (!touchModeEnabled) return;
         clearLongPressTimer();
+        const touch = e.changedTouches[0];
+        const startPoint = touchStartPoint.current;
         touchStartPoint.current = null;
         if (longPressTriggered.current) {
             if (e.cancelable) e.preventDefault();
             longPressTriggered.current = false;
+            touchMoved.current = false;
+            return;
         }
+        if (!touchMoved.current && startPoint && touch && settings.enableYomitan) {
+            if (e.cancelable) e.preventDefault();
+            e.stopPropagation();
+            lastTouchLookupAt.current = Date.now();
+            void openDictionaryLookup(touch.clientX, touch.clientY);
+        }
+        touchMoved.current = false;
     };
 
     const handleInteract = async (e: React.MouseEvent) => {
@@ -511,96 +676,8 @@ export const TextBox: React.FC<{
                 }
             }
 
-            if (!settings.enableYomitan) return;
-
-            let charOffset = 0;
-            let range: Range | null = null;
-            
-            // FIX: Robust hit-testing to fix "Next Character" scanning issue.
-            if (document.caretRangeFromPoint) {
-                range = document.caretRangeFromPoint(e.clientX, e.clientY);
-                if (range && range.startContainer.nodeType === Node.TEXT_NODE) {
-                    charOffset = range.startOffset;
-                    
-                    // If caret is > 0, check if we clicked on the *previous* character
-                    if (charOffset > 0) {
-                        const checkRange = document.createRange();
-                        checkRange.setStart(range.startContainer, charOffset - 1);
-                        checkRange.setEnd(range.startContainer, charOffset);
-                        const rect = checkRange.getBoundingClientRect();
-                        
-                        // If click is inside the previous character's box, effectively select IT.
-                        if (e.clientX >= rect.left && e.clientX <= rect.right &&
-                            e.clientY >= rect.top && e.clientY <= rect.bottom) {
-                            charOffset -= 1;
-                        }
-                    }
-                }
-            } else if ((document as any).caretPositionFromPoint) {
-                // Fallback for Firefox
-                const pos = (document as any).caretPositionFromPoint(e.clientX, e.clientY);
-                if (pos && pos.offsetNode.nodeType === Node.TEXT_NODE) {
-                    charOffset = pos.offset;
-                    if (charOffset > 0) {
-                        const checkRange = document.createRange();
-                        checkRange.setStart(pos.offsetNode, charOffset - 1);
-                        checkRange.setEnd(pos.offsetNode, charOffset);
-                        const rect = checkRange.getBoundingClientRect();
-                        
-                        if (e.clientX >= rect.left && e.clientX <= rect.right &&
-                            e.clientY >= rect.top && e.clientY <= rect.bottom) {
-                            charOffset -= 1;
-                        }
-                    }
-                }
-            }
-
-            const rawContent = cleanPunctuation(block.text, !isNoSpaceLanguage(settings.yomitanLanguage));
-            const cleanContent = rawContent.replace(/[\u200B\n\r]+/g, '');
-
-            const encoder = new TextEncoder();
-            const prefix = rawContent.substring(0, charOffset);
-            
-            const ignoredLength = (prefix.match(/[\u200B\n\r]/g) || []).length;
-            const adjustedOffset = Math.max(0, charOffset - ignoredLength);
-
-            const byteIndex = encoder.encode(cleanContent.substring(0, adjustedOffset)).length;
-
-            setDictPopup({
-                visible: true,
-                x: e.clientX,
-                y: e.clientY,
-                results: [],
-                isLoading: true,
-                systemLoading: false,
-                highlight: undefined,
-                context: { imgSrc, sentence: cleanContent, spreadData }
-            });
-
-            // Pass the resultGroupingMode setting here
-            const results = await lookupYomitan(
-                cleanContent,
-                byteIndex,
-                settings.resultGroupingMode,
-                settings.yomitanLanguage
-            );
-
-            const loadedResults = results === 'loading' ? [] : ((results as any).terms || results || []);
-
-            const loadedKanji = results === 'loading' ? [] : ((results as any).kanji || []);
-
-            if (results === 'loading') {
-                 setDictPopup(prev => ({ ...prev, results: [], kanjiResults: [], isLoading: false, systemLoading: true }));
-            } else {
-                setDictPopup(prev => ({ 
-                    ...prev, 
-                    results: loadedResults,
-                    kanjiResults: loadedKanji,
-                    isLoading: false, 
-                    systemLoading: false, 
-                    highlight: { imgSrc, index, startChar: charOffset, length: (loadedResults && loadedResults[0]?.matchLen) || 1 }
-                }));
-            }
+            if (Date.now() - lastTouchLookupAt.current < 700) return;
+            await openDictionaryLookup(e.clientX, e.clientY);
         }
     };
 
@@ -639,7 +716,7 @@ export const TextBox: React.FC<{
             <div
                 ref={ref}
                 role="button"
-                tabIndex={settings.mobileMode ? -1 : 0}
+                tabIndex={touchModeEnabled ? -1 : 0}
                 onKeyDown={handleKeyDown}
                 className={classes}
                 contentEditable={isEditing}
@@ -696,7 +773,8 @@ export const TextBox: React.FC<{
                     color: 'var(--ocr-text-color)',
                     whiteSpace: 'pre',
                     overflow: isEditing ? 'auto' : 'visible', 
-                    touchAction: 'pan-y', 
+                    touchAction: touchModeEnabled ? 'manipulation' : 'pan-y',
+                    WebkitTapHighlightColor: 'transparent',
                     
                     // Style Overrides
                     backgroundColor: isActive ? activeBgColor : bgColor,

@@ -15,7 +15,7 @@ export const DEFAULT_CHAPTER_OPTIONS: ChapterListOptions = {
     unread: undefined,
     downloaded: undefined,
     bookmarked: undefined,
-    reverse: true,
+    reverse: false,
     sortBy: 'source',
     showChapterNumber: false,
     excludedScanlators: [],

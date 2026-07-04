@@ -1,7 +1,7 @@
 use axum::{
-    response::{IntoResponse, Response},
-    http::StatusCode,
     Json,
+    http::StatusCode,
+    response::{IntoResponse, Response},
 };
 use serde_json::json;
 use thiserror::Error;

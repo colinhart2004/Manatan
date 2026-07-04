@@ -39,7 +39,8 @@ const ImageOverlayInner = memo(({
     onUpdate, 
     onMerge, 
     onDelete, 
-    shouldShowChildren 
+    shouldShowStatus,
+    shouldShowTextBoxes,
 }: any) => {
     const wrapperRef = useRef<HTMLDivElement>(null);
     const innerRef = useRef<HTMLDivElement>(null);
@@ -164,7 +165,7 @@ const ImageOverlayInner = memo(({
                     height: dimensions.height || 'auto',
                 }}
             >
-                <div style={{ opacity: shouldShowChildren ? 1 : 0, transition: 'opacity 0.2s' }}>
+                <div style={{ opacity: shouldShowStatus ? 1 : 0, transition: 'opacity 0.2s' }}>
                     <StatusIcon status={status} onRetry={onRetry} />
                 </div>
 
@@ -180,7 +181,7 @@ const ImageOverlayInner = memo(({
                         onUpdate={onUpdate}
                         onMerge={onMerge}
                         onDelete={onDelete}
-                        parentVisible={shouldShowChildren}
+                        parentVisible={shouldShowTextBoxes}
                     />
                 ))}
             </div>
@@ -330,7 +331,8 @@ export const ImageOverlay: React.FC<{
     }
     
     const isGlobalEnabled = settings.enableOverlay && isImgDisplayed && !isReaderOverlayVisible && isCorrectChapter;
-    const shouldShowChildren = !settings.soloHoverMode || settings.interactionMode === 'click' || settings.debugMode || currentStatus === 'loading' || currentStatus === 'error';
+    const shouldShowStatus = !settings.soloHoverMode || settings.interactionMode === 'click' || currentStatus === 'loading' || currentStatus === 'error';
+    const shouldShowTextBoxes = !settings.soloHoverMode || settings.interactionMode === 'click';
 
     if (!isGlobalEnabled) return null;
 
@@ -344,7 +346,8 @@ export const ImageOverlay: React.FC<{
             onUpdate={handleUpdate}
             onMerge={handleMerge}
             onDelete={handleDelete}
-            shouldShowChildren={shouldShowChildren}
+            shouldShowStatus={shouldShowStatus}
+            shouldShowTextBoxes={shouldShowTextBoxes}
         />
     );
 };

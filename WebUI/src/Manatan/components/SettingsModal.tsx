@@ -1446,7 +1446,7 @@ ${detail}`,
                                 <div>
                                     Debug Mode
                                     <div style={{ opacity: 0.6, fontSize: '0.85em' }}>
-                                        Shows extra diagnostics and debug overlays.
+                                        Enables extra diagnostic logging.
                                     </div>
                                 </div>
                             </label>

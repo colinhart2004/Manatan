@@ -1,13 +1,15 @@
 mod io;
 
 use std::{
+    collections::HashMap,
     env,
     fs::{self},
+    io::Read,
     net::{Ipv4Addr, TcpListener},
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
         mpsc::{Receiver, Sender},
     },
@@ -19,7 +21,7 @@ use anyhow::anyhow;
 use axum::{
     Router,
     body::{Body, to_bytes},
-    extract::Request,
+    extract::{Request, State},
     http::{HeaderMap, HeaderValue, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -43,8 +45,9 @@ use reqwest::{
 };
 use rust_embed::RustEmbed;
 use self_update::update::ReleaseUpdate;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::process::Command;
+use tokio::sync::Mutex as AsyncMutex;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -64,6 +67,43 @@ const SUWAYOMI_HOST: &str = "127.0.0.1";
 const SUWAYOMI_PORT: u16 = 4566;
 const SUWAYOMI_HTTP_BASE_URL: &str = "http://127.0.0.1:4566";
 const MAX_PAGES_RESPONSE_REWRITE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_PAGE_IMAGE_CONTENT_TYPE_REWRITE_BYTES: usize = 64 * 1024 * 1024;
+const MANGA_PAGE_CACHE_BUSTER: &str = "downloadfix2";
+
+static MANGA_CHAPTER_LOCKS: OnceLock<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>> = OnceLock::new();
+
+#[derive(Clone)]
+struct DownloadedMangaFallbackState {
+    db_path: PathBuf,
+    downloads_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MangaPageEndpoint {
+    Pages {
+        manga_id: i64,
+        chapter_index: i64,
+    },
+    Page {
+        manga_id: i64,
+        chapter_index: i64,
+        page_index: usize,
+    },
+}
+
+#[derive(Debug)]
+struct DownloadedChapterLocation {
+    chapter_dir: PathBuf,
+    page_count: usize,
+    cache_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DownloadManifest {
+    pages: Vec<String>,
+    #[serde(default)]
+    archive_file: Option<String>,
+}
 
 static ICON_BYTES: &[u8] = include_bytes!("../resources/faviconlogo.png");
 static JAR_BYTES: &[u8] = include_bytes!("../resources/Suwayomi-Server.jar");
@@ -123,7 +163,7 @@ struct Cli {
     #[arg(
         long,
         env = "MANATAN_RUNTIME_ONLY",
-        default_value_t = true,
+        default_value_t = false,
         action = clap::ArgAction::Set,
         value_parser = parse_boolish,
         value_name = "BOOL"
@@ -1150,6 +1190,10 @@ async fn run_server(
     let tracker_remote_search = cli.tracker_remote_search;
     let tracker_search_ttl_seconds = cli.tracker_search_ttl_seconds;
     let downloads_path = resolve_path_option(cli.downloads_path.as_ref(), data_dir, "downloads");
+    let downloaded_manga_fallback_state = DownloadedMangaFallbackState {
+        db_path: PathBuf::from(manatan_db_path.clone()),
+        downloads_path: PathBuf::from(downloads_path.clone()),
+    };
     let aidoku_index_url = cli.aidoku_index_url.clone().unwrap_or_default();
     let aidoku_enabled = cli.aidoku_enabled;
     let aidoku_cache_path = resolve_path_option(cli.aidoku_cache_path.as_ref(), data_dir, "aidoku");
@@ -1182,6 +1226,11 @@ async fn run_server(
         .await
         .map_err(|err| anyhow!("Failed runtime bridge preflight: {err}"))?;
     let manatan_router = build_router_without_cors(manatan_state)
+        .layer(middleware::from_fn_with_state(
+            downloaded_manga_fallback_state,
+            serve_downloaded_manga_fallback,
+        ))
+        .layer(middleware::from_fn(serialize_manga_chapters_requests))
         .layer(middleware::from_fn(rewrite_manga_pages_response));
 
     info!("🌍 Starting Web Interface at http://{}:{}", host, port);
@@ -1262,7 +1311,10 @@ async fn serve_react_app(uri: Uri) -> impl IntoResponse {
     {
         let mime = mime_guess::from_path(path).first_or_octet_stream();
         return (
-            [(axum::http::header::CONTENT_TYPE, mime.as_ref())],
+            [
+                (axum::http::header::CONTENT_TYPE, mime.as_ref()),
+                (axum::http::header::CACHE_CONTROL, "no-store"),
+            ],
             content.data,
         )
             .into_response();
@@ -1274,7 +1326,10 @@ async fn serve_react_app(uri: Uri) -> impl IntoResponse {
         let fixed_html = html_string.replace("<head>", "<head><base href=\"/\" />");
 
         return (
-            [(axum::http::header::CONTENT_TYPE, "text/html")],
+            [
+                (axum::http::header::CONTENT_TYPE, "text/html"),
+                (axum::http::header::CACHE_CONTROL, "no-store"),
+            ],
             fixed_html,
         )
             .into_response();
@@ -1289,12 +1344,8 @@ async fn rewrite_manga_pages_response(req: Request, next: Next) -> Response {
         return next.run(req).await;
     }
 
-    let public_base_url = public_base_url_from_request(req.headers(), req.uri());
     let response = next.run(req).await;
 
-    let Some(public_base_url) = public_base_url else {
-        return response;
-    };
     if !response.status().is_success() || !is_json_response(response.headers()) {
         return response;
     }
@@ -1311,7 +1362,7 @@ async fn rewrite_manga_pages_response(req: Request, next: Next) -> Response {
         }
     };
 
-    let Some(rewritten_body) = rewrite_manga_pages_body(&body_bytes, &public_base_url) else {
+    let Some(rewritten_body) = rewrite_manga_pages_body(&body_bytes) else {
         return Response::from_parts(parts, Body::from(body_bytes));
     };
 
@@ -1326,6 +1377,385 @@ async fn rewrite_manga_pages_response(req: Request, next: Next) -> Response {
     Response::from_parts(parts, Body::from(rewritten_body))
 }
 
+async fn serialize_manga_chapters_requests(req: Request, next: Next) -> Response {
+    let Some(manga_id) = manga_chapters_path_manga_id(req.uri().path()) else {
+        return next.run(req).await;
+    };
+
+    let lock = {
+        let locks = MANGA_CHAPTER_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut locks = locks.lock().expect("manga chapter lock registry poisoned");
+        locks
+            .entry(manga_id.to_string())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone()
+    };
+
+    let _guard = lock.lock().await;
+    next.run(req).await
+}
+
+async fn serve_downloaded_manga_fallback(
+    State(state): State<DownloadedMangaFallbackState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let endpoint = parse_manga_page_endpoint(req.uri().path());
+    if let Some(endpoint) = endpoint {
+        match tokio::task::spawn_blocking(move || downloaded_manga_response(&state, endpoint)).await
+        {
+            Ok(Some(downloaded_response)) => return downloaded_response,
+            Ok(None) => {}
+            Err(err) => {
+                warn!("downloaded manga response task failed: {err}");
+            }
+        }
+    }
+
+    let response = next.run(req).await;
+    if matches!(endpoint, Some(MangaPageEndpoint::Page { .. })) {
+        return correct_manga_page_image_content_type(response).await;
+    }
+
+    response
+}
+
+fn downloaded_manga_response(
+    state: &DownloadedMangaFallbackState,
+    endpoint: MangaPageEndpoint,
+) -> Option<Response> {
+    let location = find_downloaded_chapter_location(state, endpoint)?;
+    let manifest = read_download_manifest(&location.chapter_dir)?;
+
+    if manifest.pages.is_empty() {
+        return None;
+    }
+
+    match endpoint {
+        MangaPageEndpoint::Pages {
+            manga_id,
+            chapter_index,
+        } => downloaded_pages_response(
+            manga_id,
+            chapter_index,
+            location.page_count.max(manifest.pages.len()),
+            &location.cache_key,
+        ),
+        MangaPageEndpoint::Page {
+            page_index,
+            manga_id: _,
+            chapter_index: _,
+        } => downloaded_page_image_response(&location.chapter_dir, &manifest, page_index),
+    }
+}
+
+fn downloaded_pages_response(
+    manga_id: i64,
+    chapter_index: i64,
+    page_count: usize,
+    cache_key: &str,
+) -> Option<Response> {
+    let pages = (0..page_count)
+        .map(|page_index| {
+            cache_busted_manga_page_url(&format!(
+                "/api/v1/manga/{manga_id}/chapter/{chapter_index}/page/{page_index}?manatan_downloaded={cache_key}"
+            ))
+        })
+        .collect::<Vec<_>>();
+    let body = serde_json::to_vec(&serde_json::json!({ "pages": pages })).ok()?;
+
+    Some(
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CACHE_CONTROL, "no-store")
+            .header("x-manatan-downloaded-fallback", "1")
+            .body(Body::from(body))
+            .unwrap_or_else(|_| Response::new(Body::empty())),
+    )
+}
+
+fn downloaded_page_image_response(
+    chapter_dir: &Path,
+    manifest: &DownloadManifest,
+    page_index: usize,
+) -> Option<Response> {
+    let page_name = manifest.pages.get(page_index)?;
+    let bytes = read_downloaded_page(chapter_dir, manifest, page_name)?;
+    let content_type = content_type_for_downloaded_page(page_name, &bytes);
+
+    Some(
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, content_type)
+            .header(header::CACHE_CONTROL, "no-store")
+            .header("x-manatan-downloaded-fallback", "1")
+            .body(Body::from(bytes))
+            .unwrap_or_else(|_| Response::new(Body::empty())),
+    )
+}
+
+fn find_downloaded_chapter_location(
+    state: &DownloadedMangaFallbackState,
+    endpoint: MangaPageEndpoint,
+) -> Option<DownloadedChapterLocation> {
+    let (manga_id, chapter_index) = match endpoint {
+        MangaPageEndpoint::Pages {
+            manga_id,
+            chapter_index,
+        }
+        | MangaPageEndpoint::Page {
+            manga_id,
+            chapter_index,
+            page_index: _,
+        } => (manga_id, chapter_index),
+    };
+
+    let conn = rusqlite::Connection::open(&state.db_path).ok()?;
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT ch.id,
+                   COALESCE(ch.page_count, 0),
+                   m.source_id,
+                   COALESCE(group_concat(DISTINCT c.name), '')
+            FROM chapters ch
+            JOIN manga m ON m.id = ch.manga_id
+            LEFT JOIN manga_categories mc ON mc.manga_id = m.id
+            LEFT JOIN categories c ON c.id = mc.category_id
+            WHERE m.id = ?1 AND ch.source_order = ?2 AND ch.is_downloaded = 1
+            GROUP BY ch.id, ch.page_count, m.source_id
+            "#,
+        )
+        .ok()?;
+    let row = stmt
+        .query_row(rusqlite::params![manga_id, chapter_index], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .ok()?;
+
+    let chapter_id = row.0;
+    let db_page_count = usize::try_from(row.1).unwrap_or(0);
+    let source_id = row.2;
+    let categories = row
+        .3
+        .split(',')
+        .map(str::trim)
+        .filter(|category| !category.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+
+    let chapter_dir = find_downloaded_chapter_dir(
+        &state.downloads_path,
+        &categories,
+        &source_id,
+        manga_id,
+        chapter_id,
+    )?;
+    let manifest = read_download_manifest(&chapter_dir)?;
+    let page_count = if manifest.pages.is_empty() {
+        db_page_count
+    } else {
+        manifest.pages.len()
+    };
+
+    Some(DownloadedChapterLocation {
+        chapter_dir,
+        page_count,
+        cache_key: format!("c{chapter_id}-p{page_count}"),
+    })
+}
+
+fn find_downloaded_chapter_dir(
+    downloads_path: &Path,
+    categories: &[String],
+    source_id: &str,
+    manga_id: i64,
+    chapter_id: i64,
+) -> Option<PathBuf> {
+    let root = downloads_path.join("mangas");
+    let source_suffix = format!("--s{source_id}");
+    let manga_suffix = format!("--m{manga_id}");
+    let chapter_suffix = format!("--c{chapter_id}");
+
+    for category in categories {
+        let category_dir = root.join(category);
+        if let Some(chapter_dir) = find_chapter_dir_under_category(
+            &category_dir,
+            &source_suffix,
+            &manga_suffix,
+            &chapter_suffix,
+        ) {
+            return Some(chapter_dir);
+        }
+    }
+
+    for category_dir in fs::read_dir(root).ok()?.filter_map(Result::ok) {
+        let Ok(file_type) = category_dir.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        if let Some(chapter_dir) = find_chapter_dir_under_category(
+            &category_dir.path(),
+            &source_suffix,
+            &manga_suffix,
+            &chapter_suffix,
+        ) {
+            return Some(chapter_dir);
+        }
+    }
+
+    None
+}
+
+fn find_chapter_dir_under_category(
+    category_dir: &Path,
+    source_suffix: &str,
+    manga_suffix: &str,
+    chapter_suffix: &str,
+) -> Option<PathBuf> {
+    let source_dir = find_child_dir_by_suffix(category_dir, source_suffix)?;
+    let manga_dir = find_child_dir_by_suffix(&source_dir, manga_suffix)?;
+    find_child_dir_by_suffix(&manga_dir, chapter_suffix)
+}
+
+fn find_child_dir_by_suffix(parent: &Path, suffix: &str) -> Option<PathBuf> {
+    for entry in fs::read_dir(parent).ok()?.filter_map(Result::ok) {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() && entry.file_name().to_string_lossy().ends_with(suffix) {
+            return Some(entry.path());
+        }
+    }
+
+    None
+}
+
+fn read_download_manifest(chapter_dir: &Path) -> Option<DownloadManifest> {
+    let manifest_path = chapter_dir.join("manifest.json");
+    let bytes = fs::read(manifest_path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn read_downloaded_page(
+    chapter_dir: &Path,
+    manifest: &DownloadManifest,
+    page_name: &str,
+) -> Option<Vec<u8>> {
+    if let Some(relative_page_path) = safe_relative_manifest_path(page_name) {
+        let page_path = chapter_dir.join(relative_page_path);
+        if page_path.is_file()
+            && let Ok(bytes) = fs::read(page_path)
+        {
+            return Some(bytes);
+        }
+    }
+
+    let archive_name = manifest.archive_file.as_deref().unwrap_or("chapter.cbz");
+    let archive_relative_path = safe_relative_manifest_path(archive_name)?;
+    let archive_file = fs::File::open(chapter_dir.join(archive_relative_path)).ok()?;
+    let mut archive = zip::ZipArchive::new(archive_file).ok()?;
+    let mut page = archive.by_name(page_name).ok()?;
+    let mut bytes = Vec::new();
+    page.read_to_end(&mut bytes).ok()?;
+    Some(bytes)
+}
+
+fn safe_relative_manifest_path(path: &str) -> Option<&Path> {
+    let path = Path::new(path);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+
+    Some(path)
+}
+
+fn content_type_for_downloaded_page(page_name: &str, bytes: &[u8]) -> &'static str {
+    if let Some(content_type) = sniff_image_content_type(bytes) {
+        return content_type;
+    }
+    if page_name.to_ascii_lowercase().ends_with(".avif") {
+        return "image/avif";
+    }
+
+    "application/octet-stream"
+}
+
+async fn correct_manga_page_image_content_type(response: Response) -> Response {
+    if !response.status().is_success() || is_image_response(response.headers()) {
+        return response;
+    }
+
+    let (mut parts, body) = response.into_parts();
+    let body_bytes = match to_bytes(body, MAX_PAGE_IMAGE_CONTENT_TYPE_REWRITE_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            warn!("failed to buffer manga page image response for content-type correction: {err}");
+            return Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .body(Body::empty())
+                .unwrap_or_else(|_| Response::new(Body::empty()));
+        }
+    };
+
+    let Some(content_type) = sniff_image_content_type(&body_bytes) else {
+        return Response::from_parts(parts, Body::from(body_bytes));
+    };
+
+    parts.headers.remove(header::CONTENT_LENGTH);
+    parts.headers.remove(header::TRANSFER_ENCODING);
+    parts.headers.remove(header::CONTENT_ENCODING);
+    parts
+        .headers
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    parts
+        .headers
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    parts.headers.insert(
+        "x-manatan-image-content-type-fix",
+        HeaderValue::from_static("1"),
+    );
+
+    Response::from_parts(parts, Body::from(body_bytes))
+}
+
+fn is_image_response(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_ascii_lowercase().starts_with("image/"))
+        .unwrap_or(false)
+}
+
+fn sniff_image_content_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("image/jpeg");
+    }
+    if bytes.starts_with(b"\x89PNG\r\n\x1A\n") {
+        return Some("image/png");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+
+    None
+}
+
 fn is_json_response(headers: &HeaderMap) -> bool {
     headers
         .get(header::CONTENT_TYPE)
@@ -1334,7 +1764,7 @@ fn is_json_response(headers: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
-fn rewrite_manga_pages_body(body: &[u8], public_base_url: &str) -> Option<Vec<u8>> {
+fn rewrite_manga_pages_body(body: &[u8]) -> Option<Vec<u8>> {
     let mut value = serde_json::from_slice::<serde_json::Value>(body).ok()?;
     let pages = value.get_mut("pages")?.as_array_mut()?;
     let mut changed = false;
@@ -1343,7 +1773,7 @@ fn rewrite_manga_pages_body(body: &[u8], public_base_url: &str) -> Option<Vec<u8
         let Some(raw_url) = page.as_str() else {
             continue;
         };
-        let Some(rewritten_url) = rewrite_manga_page_url(raw_url, public_base_url) else {
+        let Some(rewritten_url) = rewrite_manga_page_url(raw_url) else {
             continue;
         };
         if rewritten_url != raw_url {
@@ -1355,9 +1785,9 @@ fn rewrite_manga_pages_body(body: &[u8], public_base_url: &str) -> Option<Vec<u8
     changed.then(|| serde_json::to_vec(&value).ok()).flatten()
 }
 
-fn rewrite_manga_page_url(raw_url: &str, public_base_url: &str) -> Option<String> {
+fn rewrite_manga_page_url(raw_url: &str) -> Option<String> {
     if raw_url.starts_with('/') {
-        return is_manga_page_path(raw_url).then(|| absolute_public_url(public_base_url, raw_url));
+        return is_manga_page_path(raw_url).then(|| cache_busted_manga_page_url(raw_url));
     }
 
     let parsed = Url::parse(raw_url).ok()?;
@@ -1372,16 +1802,20 @@ fn rewrite_manga_page_url(raw_url: &str, public_base_url: &str) -> Option<String
         path_and_query.push_str(query);
     }
 
-    Some(absolute_public_url(public_base_url, &path_and_query))
+    Some(cache_busted_manga_page_url(&path_and_query))
 }
 
-fn absolute_public_url(public_base_url: &str, path_and_query: &str) -> String {
-    let base = public_base_url.trim_end_matches('/');
-    if path_and_query.starts_with('/') {
-        format!("{base}{path_and_query}")
-    } else {
-        format!("{base}/{path_and_query}")
+fn cache_busted_manga_page_url(path_and_query: &str) -> String {
+    if path_and_query.contains("manatan_page_cache=") {
+        return path_and_query.to_string();
     }
+
+    let separator = if path_and_query.contains('?') {
+        '&'
+    } else {
+        '?'
+    };
+    format!("{path_and_query}{separator}manatan_page_cache={MANGA_PAGE_CACHE_BUSTER}")
 }
 
 fn is_manga_pages_path(path: &str) -> bool {
@@ -1408,6 +1842,69 @@ fn is_manga_pages_path(path: &str) -> bool {
             None,
         )
     )
+}
+
+fn parse_manga_page_endpoint(path: &str) -> Option<MangaPageEndpoint> {
+    let mut segments = path.trim_start_matches('/').split('/');
+    match (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) {
+        (
+            Some("api"),
+            Some("v1"),
+            Some("manga"),
+            Some(manga_id),
+            Some("chapter"),
+            Some(chapter_index),
+            Some("pages"),
+            None,
+            None,
+        ) => Some(MangaPageEndpoint::Pages {
+            manga_id: manga_id.parse().ok()?,
+            chapter_index: chapter_index.parse().ok()?,
+        }),
+        (
+            Some("api"),
+            Some("v1"),
+            Some("manga"),
+            Some(manga_id),
+            Some("chapter"),
+            Some(chapter_index),
+            Some("page"),
+            Some(page_index),
+            None,
+        ) => Some(MangaPageEndpoint::Page {
+            manga_id: manga_id.parse().ok()?,
+            chapter_index: chapter_index.parse().ok()?,
+            page_index: page_index.parse().ok()?,
+        }),
+        _ => None,
+    }
+}
+
+fn manga_chapters_path_manga_id(path: &str) -> Option<&str> {
+    let mut segments = path.trim_start_matches('/').split('/');
+    match (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) {
+        (Some("api"), Some("v1"), Some("manga"), Some(manga_id), Some("chapters"), None) => {
+            Some(manga_id)
+        }
+        _ => None,
+    }
 }
 
 fn is_manga_page_path(path: &str) -> bool {
@@ -1442,95 +1939,37 @@ fn is_loopback_or_unspecified_host(host: &str) -> bool {
     matches!(host, "127.0.0.1" | "localhost" | "::1" | "0.0.0.0")
 }
 
-fn public_base_url_from_request(headers: &HeaderMap, uri: &Uri) -> Option<String> {
-    let scheme = forwarded_proto(headers)
-        .or_else(|| first_header_part(headers, "x-forwarded-proto"))
-        .or_else(|| uri.scheme_str().map(str::to_string))
-        .unwrap_or_else(|| "http".to_string());
-    let scheme = match scheme.as_str() {
-        "http" | "https" => scheme,
-        _ => "http".to_string(),
-    };
-
-    let host = forwarded_host(headers)
-        .or_else(|| first_header_part(headers, "x-forwarded-host"))
-        .or_else(|| header_value(headers, header::HOST.as_str()))
-        .or_else(|| {
-            uri.authority()
-                .map(|authority| authority.as_str().to_string())
-        })?;
-
-    Some(format!("{scheme}://{host}"))
-}
-
-fn forwarded_proto(headers: &HeaderMap) -> Option<String> {
-    forwarded_param(headers, "proto")
-}
-
-fn forwarded_host(headers: &HeaderMap) -> Option<String> {
-    forwarded_param(headers, "host")
-}
-
-fn forwarded_param(headers: &HeaderMap, name: &str) -> Option<String> {
-    let value = header_value(headers, "forwarded")?;
-    let first_forwarded = value.split(',').next()?;
-    first_forwarded.split(';').find_map(|part| {
-        let (key, value) = part.trim().split_once('=')?;
-        key.eq_ignore_ascii_case(name)
-            .then(|| value.trim_matches('"').to_string())
-            .filter(|value| !value.is_empty())
-    })
-}
-
-fn first_header_part(headers: &HeaderMap, name: &str) -> Option<String> {
-    header_value(headers, name)?
-        .split(',')
-        .next()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
-fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn rewrites_loopback_manga_page_urls_to_request_origin() {
+    fn rewrites_loopback_manga_page_urls_to_relative_paths() {
         let body = br#"{"pages":["http://127.0.0.1:4568/api/v1/manga/1/chapter/2/page/0","http://localhost:4568/api/v1/manga/1/chapter/2/page/1?cache=true"]}"#;
 
-        let rewritten = rewrite_manga_pages_body(body, "http://203.0.113.10:4567").unwrap();
+        let rewritten = rewrite_manga_pages_body(body).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
 
         assert_eq!(
             value["pages"][0],
-            "http://203.0.113.10:4567/api/v1/manga/1/chapter/2/page/0"
+            "/api/v1/manga/1/chapter/2/page/0?manatan_page_cache=downloadfix2"
         );
         assert_eq!(
             value["pages"][1],
-            "http://203.0.113.10:4567/api/v1/manga/1/chapter/2/page/1?cache=true"
+            "/api/v1/manga/1/chapter/2/page/1?cache=true&manatan_page_cache=downloadfix2"
         );
     }
 
     #[test]
-    fn rewrites_relative_manga_page_urls_to_request_origin() {
+    fn adds_cache_buster_to_relative_manga_page_urls() {
         let body = br#"{"pages":["/api/v1/manga/1/chapter/2/page/0"]}"#;
 
-        let rewritten = rewrite_manga_pages_body(body, "http://localhost:4568").unwrap();
+        let rewritten = rewrite_manga_pages_body(body).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
 
         assert_eq!(
             value["pages"][0],
-            "http://localhost:4568/api/v1/manga/1/chapter/2/page/0"
+            "/api/v1/manga/1/chapter/2/page/0?manatan_page_cache=downloadfix2"
         );
     }
 
@@ -1538,63 +1977,30 @@ mod tests {
     fn leaves_non_loopback_and_non_page_urls_unchanged() {
         let body = br#"{"pages":["https://cdn.example.test/api/v1/manga/1/chapter/2/page/0","http://127.0.0.1:4568/api/v1/manga/1/chapter/2/thumbnail"]}"#;
 
-        assert!(rewrite_manga_pages_body(body, "http://203.0.113.10:4567").is_none());
+        assert!(rewrite_manga_pages_body(body).is_none());
     }
 
     #[test]
-    fn derives_public_base_url_from_host_header() {
-        let mut headers = HeaderMap::new();
-        headers.insert(header::HOST, HeaderValue::from_static("203.0.113.10:4567"));
-
-        let base_url = public_base_url_from_request(
-            &headers,
-            &Uri::from_static("/api/v1/manga/1/chapter/2/pages"),
-        );
-
-        assert_eq!(base_url.as_deref(), Some("http://203.0.113.10:4567"));
-    }
-
-    #[test]
-    fn derives_public_base_url_from_x_forwarded_headers() {
-        let mut headers = HeaderMap::new();
-        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:4568"));
-        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
-        headers.insert(
-            "x-forwarded-host",
-            HeaderValue::from_static("reader.example.test"),
-        );
-
-        let base_url = public_base_url_from_request(
-            &headers,
-            &Uri::from_static("/api/v1/manga/1/chapter/2/pages"),
-        );
-
-        assert_eq!(base_url.as_deref(), Some("https://reader.example.test"));
-    }
-
-    #[test]
-    fn forwarded_header_takes_priority() {
-        let mut headers = HeaderMap::new();
-        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:4568"));
-        headers.insert("x-forwarded-proto", HeaderValue::from_static("http"));
-        headers.insert(
-            "x-forwarded-host",
-            HeaderValue::from_static("ignored.example.test"),
-        );
-        headers.insert(
-            "forwarded",
-            HeaderValue::from_static("for=192.0.2.1;proto=https;host=\"reader.example.test:8443\""),
-        );
-
-        let base_url = public_base_url_from_request(
-            &headers,
-            &Uri::from_static("/api/v1/manga/1/chapter/2/pages"),
-        );
-
+    fn does_not_duplicate_manga_page_cache_buster() {
         assert_eq!(
-            base_url.as_deref(),
-            Some("https://reader.example.test:8443")
+            cache_busted_manga_page_url(
+                "/api/v1/manga/1/chapter/2/page/0?manatan_page_cache=downloadfix2"
+            ),
+            "/api/v1/manga/1/chapter/2/page/0?manatan_page_cache=downloadfix2"
         );
+    }
+
+    #[test]
+    fn sniffs_image_content_types_from_bytes() {
+        assert_eq!(
+            sniff_image_content_type(&[0xFF, 0xD8, 0xFF, 0xE0]),
+            Some("image/jpeg")
+        );
+        assert_eq!(
+            sniff_image_content_type(b"RIFFxxxxWEBP"),
+            Some("image/webp")
+        );
+        assert_eq!(sniff_image_content_type(b"PK\x03\x04"), None);
     }
 
     #[test]
@@ -1602,6 +2008,45 @@ mod tests {
         assert!(is_manga_pages_path("/api/v1/manga/1/chapter/2/pages"));
         assert!(!is_manga_pages_path("/api/v1/manga/1/chapter/2/pages/0"));
         assert!(!is_manga_pages_path("/api/v1/manga/1/chapter/2/page/0"));
+    }
+
+    #[test]
+    fn parses_downloaded_manga_fallback_endpoints() {
+        assert_eq!(
+            parse_manga_page_endpoint("/api/v1/manga/708094028058387/chapter/1/pages"),
+            Some(MangaPageEndpoint::Pages {
+                manga_id: 708094028058387,
+                chapter_index: 1
+            })
+        );
+        assert_eq!(
+            parse_manga_page_endpoint("/api/v1/manga/708094028058387/chapter/1/page/0"),
+            Some(MangaPageEndpoint::Page {
+                manga_id: 708094028058387,
+                chapter_index: 1,
+                page_index: 0
+            })
+        );
+        assert_eq!(
+            parse_manga_page_endpoint("/api/v1/manga/not-a-number/chapter/1/page/0"),
+            None
+        );
+    }
+
+    #[test]
+    fn extracts_manga_id_from_chapters_endpoint() {
+        assert_eq!(
+            manga_chapters_path_manga_id("/api/v1/manga/2779780616136912/chapters"),
+            Some("2779780616136912")
+        );
+        assert_eq!(
+            manga_chapters_path_manga_id("/api/v1/manga/2779780616136912/chapter/4/pages"),
+            None
+        );
+        assert_eq!(
+            manga_chapters_path_manga_id("/api/v1/manga/2779780616136912/chapters/extra"),
+            None
+        );
     }
 
     #[test]

@@ -3369,7 +3369,7 @@ export class RequestManager {
                 const sorted = [...nodes].sort((a: any, b: any) => {
                     const aOrder = Number(a?.sourceOrder ?? a?.index ?? 0);
                     const bOrder = Number(b?.sourceOrder ?? b?.index ?? 0);
-                    return bOrder - aOrder;
+                    return aOrder - bOrder;
                 });
                 return {
                     chapters: {
@@ -3399,7 +3399,7 @@ export class RequestManager {
                 const sorted = [...nodes].sort((a: any, b: any) => {
                     const aOrder = Number(a?.sourceOrder ?? a?.index ?? 0);
                     const bOrder = Number(b?.sourceOrder ?? b?.index ?? 0);
-                    return bOrder - aOrder;
+                    return aOrder - bOrder;
                 });
                 return {
                     chapters: {
@@ -3429,7 +3429,7 @@ export class RequestManager {
             const sorted = [...nodes].sort((a: any, b: any) => {
                 const aOrder = Number(a?.sourceOrder ?? a?.index ?? 0);
                 const bOrder = Number(b?.sourceOrder ?? b?.index ?? 0);
-                return bOrder - aOrder;
+                return aOrder - bOrder;
             });
             return {
                 chapters: {

@@ -198,7 +198,7 @@ export const OCRProvider = ({ children }: { children: ReactNode }) => {
     const [debugLog, setDebugLog] = useState<string[]>([]);
 
     const [dictPopup, setDictPopup] = useState<DictPopupState>({
-        visible: false, x: 0, y: 0, results: [], isLoading: false, systemLoading: false
+        visible: false, x: 0, y: 0, results: [], kanjiResults: [], isLoading: false, systemLoading: false
     });
 
     // --- POPUP COORDINATION ---

@@ -33,6 +33,7 @@ libc.workspace = true
 mime_guess.workspace = true
 open.workspace = true
 reqwest.workspace = true
+rusqlite.workspace = true
 rust-embed.workspace = true
 self_update.workspace = true
 serde.workspace = true

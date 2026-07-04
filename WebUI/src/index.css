@@ -107,6 +107,22 @@ html.ocr-reader-mode body {
     -webkit-user-select: none;
 }
 
+@media (pointer: coarse) {
+    .gemini-ocr-text-box {
+        cursor: pointer !important;
+        user-select: none;
+        -webkit-user-select: none;
+        -webkit-tap-highlight-color: transparent;
+        touch-action: manipulation;
+    }
+
+    .gemini-ocr-text-box.mobile-active,
+    .gemini-ocr-text-box.active-lookup {
+        user-select: text !important;
+        -webkit-user-select: text !important;
+    }
+}
+
 /* FIX: Re-enable text selection only when the box is active (Blue) */
 .gemini-ocr-text-box.mobile-active {
     user-select: text !important;

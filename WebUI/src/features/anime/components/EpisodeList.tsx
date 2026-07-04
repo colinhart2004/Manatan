@@ -14,7 +14,7 @@ import Checkbox from '@mui/material/Checkbox';
 import DoneAllIcon from '@mui/icons-material/DoneAll';
 import FilterListIcon from '@mui/icons-material/FilterList';
 import { styled } from '@mui/material/styles';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import Divider from '@mui/material/Divider';
 import Menu from '@mui/material/Menu';
 import MenuItem from '@mui/material/MenuItem';
@@ -101,10 +101,19 @@ export const EpisodeList = ({
         `anime-${animeId}-episode-filter`,
         'all',
     );
-    const [sort, setSort] = useLocalStorage<EpisodeSort>(`anime-${animeId}-episode-sort`, 'episodeDesc');
+    const [sort, setSort] = useLocalStorage<EpisodeSort>(`anime-${animeId}-episode-sort`, 'episodeAsc');
     const [menuAnchor, setMenuAnchor] = useState<null | HTMLElement>(null);
     const [isActionLoading, setIsActionLoading] = useState(false);
     const [downloadTarget, setDownloadTarget] = useState<EpisodeResponse | null>(null);
+
+    useEffect(() => {
+        const migrationKey = `anime-${animeId}-episode-sort-orderfix1`;
+        if (sort === 'episodeDesc' && window.localStorage.getItem(migrationKey) !== '1') {
+            setSort('episodeAsc');
+        }
+        window.localStorage.setItem(migrationKey, '1');
+    }, [animeId, setSort, sort]);
+
     useResizeObserver(
         listHeaderRef,
         useCallback(() => setListHeaderHeight(listHeaderRef?.offsetHeight ?? 0), [listHeaderRef]),
@@ -142,7 +151,7 @@ export const EpisodeList = ({
                 case 'dateDesc':
                     return b.uploadDate - a.uploadDate;
                 default:
-                    return episodeNumberB - episodeNumberA;
+                    return episodeNumberA - episodeNumberB;
             }
         });
         return sorted;
@@ -349,15 +358,6 @@ export const EpisodeList = ({
                 </MenuItem>
                 <Divider />
                 <MenuItem
-                    selected={sort === 'episodeDesc'}
-                    onClick={() => {
-                        setSort('episodeDesc');
-                        setMenuAnchor(null);
-                    }}
-                >
-                    Episode number (desc)
-                </MenuItem>
-                <MenuItem
                     selected={sort === 'episodeAsc'}
                     onClick={() => {
                         setSort('episodeAsc');
@@ -365,6 +365,15 @@ export const EpisodeList = ({
                     }}
                 >
                     Episode number (asc)
+                </MenuItem>
+                <MenuItem
+                    selected={sort === 'episodeDesc'}
+                    onClick={() => {
+                        setSort('episodeDesc');
+                        setMenuAnchor(null);
+                    }}
+                >
+                    Episode number (desc)
                 </MenuItem>
                 <MenuItem
                     selected={sort === 'dateDesc'}

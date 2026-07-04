@@ -13,6 +13,189 @@ const POPUP_MAX_WIDTH_PX = 1920;
 const POPUP_MIN_HEIGHT_PX = 200;
 const POPUP_MAX_HEIGHT_PX = 1080;
 
+const STRUCTURED_CONTENT_CSS = `
+.yomitan-popup {
+    --text-color: currentColor;
+    --background-color: transparent;
+    --link-color: #7cc8ff;
+    --accent-color: #7cc8ff;
+    --light-border-color: rgba(160, 160, 160, 0.42);
+    --medium-border-color: rgba(160, 160, 160, 0.62);
+}
+
+.yomitan-popup [data-sc-class~="tag"],
+.yomitan-popup .tag,
+.yomitan-popup .tag-label {
+    display: inline-flex !important;
+    align-items: center;
+    max-width: 100%;
+    margin: 0.12em 0.35em 0.12em 0 !important;
+    padding: 0.18em 0.42em !important;
+    border-radius: 0.35em !important;
+    font-size: 0.78em !important;
+    font-weight: 700;
+    line-height: 1.25 !important;
+    vertical-align: baseline;
+    white-space: normal !important;
+    overflow-wrap: anywhere !important;
+    word-break: normal;
+}
+
+.yomitan-popup .tag > .tag-label {
+    display: inline !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border-radius: 0 !important;
+    background-color: transparent !important;
+    color: inherit !important;
+    font-size: inherit !important;
+    line-height: inherit !important;
+    white-space: inherit !important;
+}
+
+.yomitan-popup .tag-list,
+.yomitan-popup .definition-tag-list,
+.yomitan-popup .headword-list-tag-list {
+    display: flex !important;
+    flex-wrap: wrap;
+    gap: 0.28rem;
+    min-width: 0;
+}
+
+.yomitan-popup .definition-item,
+.yomitan-popup .gloss-item {
+    gap: 0.55rem;
+    min-width: 0;
+}
+
+.yomitan-popup .definition-item > *,
+.yomitan-popup .gloss-item > * {
+    min-width: 0;
+}
+
+.yomitan-popup [data-sc-content="part-of-speech-info"],
+.yomitan-popup .tag-part-of-speech {
+    background-color: #565656 !important;
+    color: #fff !important;
+}
+
+.yomitan-popup [data-sc-content="misc-info"] {
+    background-color: #7a4638 !important;
+    color: #fff !important;
+}
+
+.yomitan-popup [data-sc-content="field-info"] {
+    background-color: #73509d !important;
+    color: #fff !important;
+}
+
+.yomitan-popup [data-sc-content="dialect-info"] {
+    background-color: #3d7b4f !important;
+    color: #fff !important;
+}
+
+.yomitan-popup [data-sc-content="sense-group"],
+.yomitan-popup [data-sc-content="sense"],
+.yomitan-popup [data-sc-role="sense-item"] {
+    margin-top: 0.25em;
+}
+
+.yomitan-popup [data-sc-content="glossary"],
+.yomitan-popup [data-sc-role="pattern-list"] {
+    margin: 0.2em 0 0.35em;
+    padding-left: 1.15em;
+}
+
+.yomitan-popup [data-sc-class~="extra-box"],
+.yomitan-popup [data-sc-role="block-body"] {
+    border-left: 3px solid rgba(150, 150, 150, 0.7) !important;
+    border-radius: 0.4rem !important;
+    margin: 0.55rem 0 !important;
+    padding: 0.5rem 0.65rem !important;
+    background-color: rgba(150, 150, 150, 0.08) !important;
+}
+
+.yomitan-popup [data-sc-content="example-sentence"] {
+    border-left-color: rgba(170, 170, 170, 0.86) !important;
+    background-color: rgba(170, 170, 170, 0.09) !important;
+}
+
+.yomitan-popup [data-sc-content="sense-note"],
+.yomitan-popup [data-sc-content="info-gloss"],
+.yomitan-popup [data-sc-role="block-body"][data-sc-kind="explains"] {
+    border-left-color: #c89b32 !important;
+    background-color: rgba(200, 155, 50, 0.11) !important;
+}
+
+.yomitan-popup [data-sc-content="lang-source"],
+.yomitan-popup [data-sc-content="keyword"],
+.yomitan-popup [data-sc-role="block-body"][data-sc-kind="keyword"] {
+    border-left-color: #9b6bd3 !important;
+    background-color: rgba(155, 107, 211, 0.11) !important;
+}
+
+.yomitan-popup [data-sc-content="xref"] {
+    border-left-color: #4f9cff !important;
+    background-color: rgba(79, 156, 255, 0.11) !important;
+}
+
+.yomitan-popup [data-sc-content="antonym"],
+.yomitan-popup [data-sc-role="block-body"][data-sc-kind="examples"] {
+    border-left-color: #d46a6a !important;
+    background-color: rgba(212, 106, 106, 0.11) !important;
+}
+
+.yomitan-popup [data-sc-content="example-sentence-a"] {
+    font-size: 1.12em;
+}
+
+.yomitan-popup [data-sc-content="example-sentence-b"],
+.yomitan-popup [data-sc-content="xref-glossary"],
+.yomitan-popup [data-sc-content="antonym-glossary"],
+.yomitan-popup [data-sc-class="extra-label"] {
+    color: var(--text-muted, rgba(180, 180, 180, 0.88));
+    font-size: 0.9em;
+}
+
+.yomitan-popup ruby rt {
+    visibility: visible !important;
+    opacity: 0.82 !important;
+    font-size: 0.62em !important;
+}
+
+@media (pointer: coarse), (max-width: 700px) {
+    .yomitan-popup {
+        font-size: 15px;
+        line-height: 1.55;
+        overflow-wrap: break-word;
+        word-break: normal;
+    }
+
+    .yomitan-popup [data-sc-class~="tag"],
+    .yomitan-popup .tag,
+    .yomitan-popup .tag-label {
+        margin: 0.16em 0.4em 0.16em 0 !important;
+        padding: 0.22em 0.48em !important;
+    }
+
+    .yomitan-popup .tag > .tag-label {
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+
+    .yomitan-popup [data-sc-class~="extra-box"],
+    .yomitan-popup [data-sc-role="block-body"] {
+        margin: 0.5rem 0;
+        padding: 0.5rem 0.6rem;
+    }
+
+    .yomitan-popup .definition-item,
+    .yomitan-popup .gloss-item {
+        align-items: flex-start;
+    }
+}
+`;
+
 
 interface LookupHistoryEntry {
     term: string;
@@ -63,6 +246,7 @@ export const YomitanPopup = () => {
     const { dictPopup, setDictPopup, notifyPopupClosed, settings } = useOCR();
     const popupRef = useRef<HTMLDivElement>(null);
     const backdropRef = useRef<HTMLDivElement>(null);
+    const openedAtRef = useRef(0);
     const [posStyle, setPosStyle] = React.useState<React.CSSProperties>({});
     const [history, setHistory] = useState<LookupHistoryEntry[]>([]);
     const [historyIndex, setHistoryIndex] = useState(-1);
@@ -116,6 +300,12 @@ export const YomitanPopup = () => {
     const kanjiResults = currentEntry ? currentEntry.kanjiResults : (dictPopup.kanjiResults || []);
     const isLoading = currentEntry ? currentEntry.isLoading : dictPopup.isLoading;
     const systemLoading = currentEntry ? currentEntry.systemLoading : dictPopup.systemLoading ?? false;
+
+    React.useEffect(() => {
+        if (dictPopup.visible) {
+            openedAtRef.current = Date.now();
+        }
+    }, [dictPopup.visible]);
 
     // Sync history when initial lookup completes
     React.useEffect(() => {
@@ -487,6 +677,7 @@ export const YomitanPopup = () => {
             notifyPopupClosed();
             setDictPopup(prev => ({ ...prev, visible: false }));
         };
+        const shouldIgnoreOpeningGesture = () => Date.now() - openedAtRef.current < 450;
 
         const onTouchStart = (e: TouchEvent) => {
             if (e.cancelable) e.preventDefault();
@@ -496,11 +687,13 @@ export const YomitanPopup = () => {
         const onTouchEnd = (e: TouchEvent) => {
             if (e.cancelable) e.preventDefault();
             e.stopPropagation();
+            if (shouldIgnoreOpeningGesture()) return;
             closePopup();
         };
 
         const onClick = (e: MouseEvent) => {
             e.stopPropagation();
+            if (shouldIgnoreOpeningGesture()) return;
             closePopup();
         };
 
@@ -536,6 +729,9 @@ export const YomitanPopup = () => {
         backgroundColor: theme.bg, color: theme.fg, border: `1px solid ${theme.border}`,
         borderRadius: '8px', boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
         padding: '16px', fontFamily: 'sans-serif', fontSize: '14px', lineHeight: '1.5',
+        overflowWrap: 'break-word',
+        wordBreak: 'normal',
+        WebkitOverflowScrolling: 'touch',
         transform: `scale(${popupScale})`,
         transformOrigin: 'top left',
         ...posStyle
@@ -543,6 +739,7 @@ export const YomitanPopup = () => {
 
     return createPortal(
         <>
+            <style>{STRUCTURED_CONTENT_CSS}</style>
             {customPopupCss && <style>{customPopupCss}</style>}
             <HighlightOverlay />
             <div
@@ -568,6 +765,7 @@ export const YomitanPopup = () => {
                 }}
                 onMouseDown={e => e.stopPropagation()}
                 onTouchStart={e => e.stopPropagation()}
+                onTouchEnd={e => e.stopPropagation()}
                 onClick={e => e.stopPropagation()}
                 onWheel={e => e.stopPropagation()}
             >

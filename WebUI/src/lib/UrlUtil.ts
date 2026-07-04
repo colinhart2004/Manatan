@@ -33,7 +33,16 @@ export class UrlUtil {
         const urlParams = this.createParams(params).toString();
 
         if (urlParams) {
-            return `${path}?${urlParams}`;
+            const hashIndex = path.indexOf('#');
+            const pathAndQuery = hashIndex === -1 ? path : path.slice(0, hashIndex);
+            const hash = hashIndex === -1 ? '' : path.slice(hashIndex);
+            const separator = pathAndQuery.endsWith('?') || pathAndQuery.endsWith('&')
+                ? ''
+                : pathAndQuery.includes('?')
+                  ? '&'
+                  : '?';
+
+            return `${pathAndQuery}${separator}${urlParams}${hash}`;
         }
 
         return path;

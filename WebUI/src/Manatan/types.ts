@@ -67,6 +67,7 @@ export type WordAudioSource =
     | 'wiktionary';
 
 export type WordAudioSourceSelection = WordAudioSource | 'auto';
+export type LookupTriggerKey = 'left-click' | 'right-click' | 'middle-click' | 'shift' | 'control' | 'alt' | 'super';
 
 export interface ServerSettingsData { authUsername?: string; authPassword?: string; }
 
@@ -117,8 +118,10 @@ export interface Settings {
     disableStatusIcon: boolean;
     autoPlayWordAudio: boolean;
     enableYomitan: boolean;
+    yomitanLookupTrigger: LookupTriggerKey;
     deleteModifierKey: string;
     mergeModifierKey: string;
+    textBoxContextMenuHotkeys: string[];
     site: SiteConfig;
     ankiConnectEnabled: boolean;
     ankiConnectUrl: string;
@@ -351,6 +354,7 @@ export const DEFAULT_SETTINGS: Settings = {
     disableStatusIcon: false,
     autoPlayWordAudio: false,
     enableYomitan: ENABLE_YOMITAN_DEFAULT,
+    yomitanLookupTrigger: 'left-click',
     // Default to grouped
     resultGroupingMode: 'grouped',
     yomitanLookupNavigationMode: 'stacked',
@@ -358,6 +362,7 @@ export const DEFAULT_SETTINGS: Settings = {
     yomitanShowKanjiInNormalLookup: false,
     deleteModifierKey: 'Alt',
     mergeModifierKey: 'Control',
+    textBoxContextMenuHotkeys: ['right-click'],
     site: {
         imageContainerSelectors: [
             'div.muiltr-masn8', 'div.muiltr-79elbk', 'div.muiltr-u43rde',

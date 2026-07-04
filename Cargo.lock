@@ -3586,6 +3586,7 @@ dependencies = [
  "open",
  "openssl-sys",
  "reqwest",
+ "rusqlite",
  "rust-embed",
  "self_update",
  "serde",

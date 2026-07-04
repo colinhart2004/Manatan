@@ -86,7 +86,7 @@ import {
     renderAnkiPitchAccentCategories,
     renderAnkiPitchAccentPositions,
 } from '@/Manatan/utils/pitchAccentExport.ts';
-import { DictionaryResult, WordAudioSource, WordAudioSourceSelection } from '@/Manatan/types.ts';
+import { DictionaryResult, Settings, WordAudioSource, WordAudioSourceSelection } from '@/Manatan/types.ts';
 import { StructuredContent, DictionaryView } from '@/Manatan/components/DictionaryView.tsx';
 import { PronunciationSection, extractPronunciationData } from '@/Manatan/components/Pronunciation.tsx';
 import { makeToast } from '@/base/utils/Toast.ts';
@@ -162,6 +162,63 @@ const playbackRates = [0.5, 0.75, 1, 1.25, 1.5, 2];
 const SUBTITLE_TIME_EPSILON = 0.05;
 const SUBTITLE_LATIN_WORD_REGEX = /[\p{L}\p{N}'’_-]/u;
 const SUBTITLE_CJK_REGEX = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
+
+const clampNumber = (value: unknown, fallback: number, min: number, max: number) => {
+    const numeric = typeof value === 'number' ? value : Number(value);
+    if (!Number.isFinite(numeric)) {
+        return fallback;
+    }
+    return Math.min(Math.max(numeric, min), max);
+};
+
+const buildSubtitleCssFilter = (settings: Settings) => {
+    const brightness = clampNumber(settings.subtitleFilterBrightness, 100, 0, 300);
+    const contrast = clampNumber(settings.subtitleFilterContrast, 100, 0, 300);
+    const saturate = clampNumber(settings.subtitleFilterSaturate, 100, 0, 300);
+    const hueRotate = clampNumber(settings.subtitleFilterHueRotate, 0, -180, 180);
+    const blur = clampNumber(settings.subtitleFilterBlur, 0, 0, 12);
+    const sepia = clampNumber(settings.subtitleFilterSepia, 0, 0, 100);
+    const grayscale = clampNumber(settings.subtitleFilterGrayscale, 0, 0, 100);
+    const invert = clampNumber(settings.subtitleFilterInvert, 0, 0, 100);
+
+    const filters = [
+        brightness !== 100 ? `brightness(${brightness}%)` : '',
+        contrast !== 100 ? `contrast(${contrast}%)` : '',
+        saturate !== 100 ? `saturate(${saturate}%)` : '',
+        hueRotate !== 0 ? `hue-rotate(${hueRotate}deg)` : '',
+        blur > 0 ? `blur(${blur}px)` : '',
+        sepia > 0 ? `sepia(${sepia}%)` : '',
+        grayscale > 0 ? `grayscale(${grayscale}%)` : '',
+        invert > 0 ? `invert(${invert}%)` : '',
+    ].filter(Boolean);
+
+    return filters.length ? filters.join(' ') : 'none';
+};
+
+const buildSubtitleOutlineShadow = (thickness: unknown) => {
+    const outline = clampNumber(thickness, 2, 0, 12);
+    if (outline <= 0) {
+        return 'none';
+    }
+
+    const blur = Math.max(1, Math.min(outline * 0.75, 4));
+    const softBlur = Math.max(2, outline + 2);
+    const offsets = [
+        [0, -outline],
+        [outline, -outline],
+        [outline, 0],
+        [outline, outline],
+        [0, outline],
+        [-outline, outline],
+        [-outline, 0],
+        [-outline, -outline],
+    ];
+
+    return [
+        `0 0 ${softBlur}px rgba(0,0,0,0.95)`,
+        ...offsets.map(([x, y]) => `${x}px ${y}px ${blur}px rgba(0,0,0,0.95)`),
+    ].join(', ');
+};
 
 const getSubtitleHighlightRange = (
     text: string,
@@ -801,6 +858,23 @@ export const AnimeVideoPlayer = ({
     >({});
     const ankiActionPendingRef = useRef<Record<string, boolean>>({});
     const shouldRenderSubtitles = !isSubtitleDisabled && selectedSubtitleIndex !== null;
+    const subtitleCssFilter = useMemo(
+        () => buildSubtitleCssFilter(settings),
+        [
+            settings.subtitleFilterBlur,
+            settings.subtitleFilterBrightness,
+            settings.subtitleFilterContrast,
+            settings.subtitleFilterGrayscale,
+            settings.subtitleFilterHueRotate,
+            settings.subtitleFilterInvert,
+            settings.subtitleFilterSaturate,
+            settings.subtitleFilterSepia,
+        ],
+    );
+    const subtitleTextShadow = useMemo(
+        () => buildSubtitleOutlineShadow(settings.subtitleOutlineThickness),
+        [settings.subtitleOutlineThickness],
+    );
 
     const resetSubtitleDisplay = useCallback(() => {
         if (subtitleRenderResetRef.current !== null) {
@@ -4956,7 +5030,7 @@ export const AnimeVideoPlayer = ({
                                 pointerEvents: 'auto',
                                 cursor: 'pointer',
                                 whiteSpace: 'pre-line',
-                                textShadow: '0 2px 4px rgba(0,0,0,0.8)',
+                                filter: subtitleCssFilter,
                                 display: 'inline-block',
                                 alignSelf: 'center',
                                 maxWidth: '100%',
@@ -4971,8 +5045,7 @@ export const AnimeVideoPlayer = ({
                                 sx={{
                                     fontSize: settings.subtitleFontSize || 22,
                                     fontWeight: settings.subtitleFontWeight ?? 600,
-                                    textShadow:
-                                        '0 0 1px rgba(0,0,0,0.9), 0 1px 1px rgba(0,0,0,0.9), 0 -1px 1px rgba(0,0,0,0.9), 1px 0 1px rgba(0,0,0,0.9), -1px 0 1px rgba(0,0,0,0.9)',
+                                    textShadow: subtitleTextShadow,
                                 }}
                             >
                                 {renderSubtitleText(cue.text, cue.id)}

@@ -81,6 +81,15 @@ export interface Settings {
     boundingBoxAdjustment: number;
     subtitleFontSize: number;
     subtitleFontWeight: number;
+    subtitleOutlineThickness: number;
+    subtitleFilterBrightness: number;
+    subtitleFilterContrast: number;
+    subtitleFilterSaturate: number;
+    subtitleFilterHueRotate: number;
+    subtitleFilterBlur: number;
+    subtitleFilterSepia: number;
+    subtitleFilterGrayscale: number;
+    subtitleFilterInvert: number;
     animePopupWidthUnit: 'percent' | 'px';
     animePopupHeightUnit: 'percent' | 'px';
     animePopupTopOffsetUnit: 'percent' | 'px';
@@ -317,6 +326,15 @@ export const DEFAULT_SETTINGS: Settings = {
     boundingBoxAdjustment: 5,
     subtitleFontSize: 22,
     subtitleFontWeight: 600,
+    subtitleOutlineThickness: 2,
+    subtitleFilterBrightness: 100,
+    subtitleFilterContrast: 100,
+    subtitleFilterSaturate: 100,
+    subtitleFilterHueRotate: 0,
+    subtitleFilterBlur: 0,
+    subtitleFilterSepia: 0,
+    subtitleFilterGrayscale: 0,
+    subtitleFilterInvert: 0,
     animePopupWidthUnit: 'percent',
     animePopupHeightUnit: 'percent',
     animePopupTopOffsetUnit: 'percent',

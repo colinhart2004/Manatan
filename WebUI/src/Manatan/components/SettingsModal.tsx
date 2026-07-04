@@ -417,6 +417,15 @@ export const SettingsModal: React.FC<{ onClose: () => void }> = ({ onClose }) =>
         });
     };
 
+    const handleNumberChange = (
+        key: keyof typeof settings | string,
+        rawValue: string,
+        fallback: number,
+    ) => {
+        const nextValue = Number(rawValue);
+        handleChange(key, Number.isFinite(nextValue) ? nextValue : fallback);
+    };
+
     const resetPopupWidth = () => {
         handleChange('animePopupWidthUnit', DEFAULT_SETTINGS.animePopupWidthUnit);
         handleChange('animePopupWidthPercent', DEFAULT_SETTINGS.animePopupWidthPercent);
@@ -427,6 +436,25 @@ export const SettingsModal: React.FC<{ onClose: () => void }> = ({ onClose }) =>
         handleChange('animePopupHeightUnit', DEFAULT_SETTINGS.animePopupHeightUnit);
         handleChange('animePopupHeightPercent', DEFAULT_SETTINGS.animePopupHeightPercent);
         handleChange('animePopupHeightPx', DEFAULT_SETTINGS.animePopupHeightPx);
+    };
+
+    const resetSubtitleAppearance = () => {
+        setLocalSettings((prev) => {
+            const next = {
+                ...prev,
+                subtitleOutlineThickness: DEFAULT_SETTINGS.subtitleOutlineThickness,
+                subtitleFilterBrightness: DEFAULT_SETTINGS.subtitleFilterBrightness,
+                subtitleFilterContrast: DEFAULT_SETTINGS.subtitleFilterContrast,
+                subtitleFilterSaturate: DEFAULT_SETTINGS.subtitleFilterSaturate,
+                subtitleFilterHueRotate: DEFAULT_SETTINGS.subtitleFilterHueRotate,
+                subtitleFilterBlur: DEFAULT_SETTINGS.subtitleFilterBlur,
+                subtitleFilterSepia: DEFAULT_SETTINGS.subtitleFilterSepia,
+                subtitleFilterGrayscale: DEFAULT_SETTINGS.subtitleFilterGrayscale,
+                subtitleFilterInvert: DEFAULT_SETTINGS.subtitleFilterInvert,
+            };
+            persistSettings(next);
+            return next;
+        });
     };
 
     const resetPopupTop = () => {
@@ -1491,12 +1519,12 @@ ${detail}`,
                                 min="8"
                                 max="64"
                                 value={localSettings.subtitleFontSize}
-                                onChange={(e) => handleChange('subtitleFontSize', parseInt(e.target.value, 10))}
+                                onChange={(e) => handleNumberChange('subtitleFontSize', e.target.value, DEFAULT_SETTINGS.subtitleFontSize)}
                             />
                             <div style={{ gridColumn: '1 / -1', fontSize: '0.85em', color: '#aaa' }}>
                                 Controls subtitle text size in the video player.
                             </div>
-                            <label htmlFor="subtitleFontWeight">Subtitle Thickness</label>
+                            <label htmlFor="subtitleFontWeight">Subtitle Font Weight</label>
                             <input
                                 id="subtitleFontWeight"
                                 type="number"
@@ -1504,10 +1532,110 @@ ${detail}`,
                                 min="100"
                                 max="900"
                                 value={localSettings.subtitleFontWeight ?? 600}
-                                onChange={(e) => handleChange('subtitleFontWeight', parseInt(e.target.value, 10))}
+                                onChange={(e) => handleNumberChange('subtitleFontWeight', e.target.value, DEFAULT_SETTINGS.subtitleFontWeight)}
                             />
                             <div style={{ gridColumn: '1 / -1', fontSize: '0.85em', color: '#aaa' }}>
                                 Higher values make subtitles bolder and easier to read.
+                            </div>
+                            <label htmlFor="subtitleOutlineThickness">Subtitle Outline (px)</label>
+                            <input
+                                id="subtitleOutlineThickness"
+                                type="number"
+                                step="0.5"
+                                min="0"
+                                max="12"
+                                value={localSettings.subtitleOutlineThickness ?? DEFAULT_SETTINGS.subtitleOutlineThickness}
+                                onChange={(e) => handleNumberChange('subtitleOutlineThickness', e.target.value, DEFAULT_SETTINGS.subtitleOutlineThickness)}
+                            />
+                            <div style={{ gridColumn: '1 / -1', fontSize: '0.85em', color: '#aaa' }}>
+                                Controls the black outline around subtitle text. Set to 0 to disable the outline.
+                            </div>
+                            <div style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', marginTop: '4px' }}>
+                                <strong>Subtitle Filters</strong>
+                                <ResetButton onClick={resetSubtitleAppearance} variant="outlined" />
+                            </div>
+                            <label htmlFor="subtitleFilterBrightness">Brightness (%)</label>
+                            <input
+                                id="subtitleFilterBrightness"
+                                type="number"
+                                step="5"
+                                min="0"
+                                max="300"
+                                value={localSettings.subtitleFilterBrightness ?? DEFAULT_SETTINGS.subtitleFilterBrightness}
+                                onChange={(e) => handleNumberChange('subtitleFilterBrightness', e.target.value, DEFAULT_SETTINGS.subtitleFilterBrightness)}
+                            />
+                            <label htmlFor="subtitleFilterContrast">Contrast (%)</label>
+                            <input
+                                id="subtitleFilterContrast"
+                                type="number"
+                                step="5"
+                                min="0"
+                                max="300"
+                                value={localSettings.subtitleFilterContrast ?? DEFAULT_SETTINGS.subtitleFilterContrast}
+                                onChange={(e) => handleNumberChange('subtitleFilterContrast', e.target.value, DEFAULT_SETTINGS.subtitleFilterContrast)}
+                            />
+                            <label htmlFor="subtitleFilterSaturate">Saturation (%)</label>
+                            <input
+                                id="subtitleFilterSaturate"
+                                type="number"
+                                step="5"
+                                min="0"
+                                max="300"
+                                value={localSettings.subtitleFilterSaturate ?? DEFAULT_SETTINGS.subtitleFilterSaturate}
+                                onChange={(e) => handleNumberChange('subtitleFilterSaturate', e.target.value, DEFAULT_SETTINGS.subtitleFilterSaturate)}
+                            />
+                            <label htmlFor="subtitleFilterHueRotate">Hue Rotate (deg)</label>
+                            <input
+                                id="subtitleFilterHueRotate"
+                                type="number"
+                                step="5"
+                                min="-180"
+                                max="180"
+                                value={localSettings.subtitleFilterHueRotate ?? DEFAULT_SETTINGS.subtitleFilterHueRotate}
+                                onChange={(e) => handleNumberChange('subtitleFilterHueRotate', e.target.value, DEFAULT_SETTINGS.subtitleFilterHueRotate)}
+                            />
+                            <label htmlFor="subtitleFilterBlur">Blur (px)</label>
+                            <input
+                                id="subtitleFilterBlur"
+                                type="number"
+                                step="0.5"
+                                min="0"
+                                max="12"
+                                value={localSettings.subtitleFilterBlur ?? DEFAULT_SETTINGS.subtitleFilterBlur}
+                                onChange={(e) => handleNumberChange('subtitleFilterBlur', e.target.value, DEFAULT_SETTINGS.subtitleFilterBlur)}
+                            />
+                            <label htmlFor="subtitleFilterSepia">Sepia (%)</label>
+                            <input
+                                id="subtitleFilterSepia"
+                                type="number"
+                                step="5"
+                                min="0"
+                                max="100"
+                                value={localSettings.subtitleFilterSepia ?? DEFAULT_SETTINGS.subtitleFilterSepia}
+                                onChange={(e) => handleNumberChange('subtitleFilterSepia', e.target.value, DEFAULT_SETTINGS.subtitleFilterSepia)}
+                            />
+                            <label htmlFor="subtitleFilterGrayscale">Grayscale (%)</label>
+                            <input
+                                id="subtitleFilterGrayscale"
+                                type="number"
+                                step="5"
+                                min="0"
+                                max="100"
+                                value={localSettings.subtitleFilterGrayscale ?? DEFAULT_SETTINGS.subtitleFilterGrayscale}
+                                onChange={(e) => handleNumberChange('subtitleFilterGrayscale', e.target.value, DEFAULT_SETTINGS.subtitleFilterGrayscale)}
+                            />
+                            <label htmlFor="subtitleFilterInvert">Invert (%)</label>
+                            <input
+                                id="subtitleFilterInvert"
+                                type="number"
+                                step="5"
+                                min="0"
+                                max="100"
+                                value={localSettings.subtitleFilterInvert ?? DEFAULT_SETTINGS.subtitleFilterInvert}
+                                onChange={(e) => handleNumberChange('subtitleFilterInvert', e.target.value, DEFAULT_SETTINGS.subtitleFilterInvert)}
+                            />
+                            <div style={{ gridColumn: '1 / -1', fontSize: '0.85em', color: '#aaa' }}>
+                                These filters apply to rendered subtitle text and its outline.
                             </div>
                             <div style={{ gridColumn: '1 / -1', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>

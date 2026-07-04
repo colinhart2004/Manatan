@@ -22,7 +22,6 @@ import { useMetadataServerSettings } from '@/features/settings/services/ServerSe
 import { useAppTitle } from '@/features/navigation-bar/hooks/useAppTitle.ts';
 import { useNavigationSettings } from '@/features/navigation-bar/NavigationBar.hooks.ts';
 import type { NavbarItem } from '@/features/navigation-bar/NavigationBar.types.ts';
-import { NavBarItemMoreGroup } from '@/features/navigation-bar/NavigationBar.types.ts';
 
 export const More = () => {
     const { t } = useTranslation();
@@ -43,23 +42,37 @@ export const More = () => {
         visibleTabs,
     });
 
-    const hiddenNavBarItemsByMoreGroup = Object.groupBy(hiddenNavBarItems, (item) => item.moreGroup);
+    const hiddenItemMoreGroup = NAVIGATION_BAR_ITEMS.find((item) => item.path === AppRoutes.downloads.path)?.moreGroup;
+
+    if (hiddenItemMoreGroup == null) {
+        throw new Error('Unable to find hidden navigation item group');
+    }
+
+    const hiddenNavBarItemsByMoreGroup = hiddenNavBarItems.reduce<
+        Partial<Record<NavbarItem['moreGroup'], NavbarItem[]>>
+    >(
+        (groups, item) => ({
+            ...groups,
+            [item.moreGroup]: [...(groups[item.moreGroup] ?? []), item],
+        }),
+        {},
+    );
 
     const hiddenItemsMoreGroup = [
-        ...(hiddenNavBarItemsByMoreGroup[NavBarItemMoreGroup.HIDDEN_ITEM] ?? []),
+        ...(hiddenNavBarItemsByMoreGroup[hiddenItemMoreGroup] ?? []),
         {
             path: AppRoutes.settings.childRoutes.categories.path,
             title: 'category.title.category_other',
             SelectedIconComponent: ListAltIcon,
             IconComponent: ListAltIcon,
             show: 'both',
-            moreGroup: NavBarItemMoreGroup.HIDDEN_ITEM,
+            moreGroup: hiddenItemMoreGroup,
         },
     ] satisfies NavbarItem[];
 
     const finalHiddenNavBarItemsByGroup: typeof hiddenNavBarItemsByMoreGroup = {
         ...hiddenNavBarItemsByMoreGroup,
-        [NavBarItemMoreGroup.HIDDEN_ITEM]: hiddenItemsMoreGroup,
+        [hiddenItemMoreGroup]: hiddenItemsMoreGroup,
     };
 
     return (

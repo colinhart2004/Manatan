@@ -8,10 +8,12 @@
 
 import { Fragment } from 'react';
 import { useTranslation } from 'react-i18next';
+import ListAltIcon from '@mui/icons-material/ListAlt';
 import List from '@mui/material/List';
 import ListItemIcon from '@mui/material/ListItemIcon';
 import ListItemText from '@mui/material/ListItemText';
 import Divider from '@mui/material/Divider';
+import { AppRoutes } from '@/base/AppRoute.constants.ts';
 import { ListItemLink } from '@/base/components/lists/ListItemLink.tsx';
 import { NAVIGATION_BAR_ITEMS } from '@/features/navigation-bar/NavigationBar.constants.ts';
 import { MediaQuery } from '@/base/utils/MediaQuery.tsx';
@@ -19,6 +21,8 @@ import { NavigationBarUtil } from '@/features/navigation-bar/NavigationBar.util.
 import { useMetadataServerSettings } from '@/features/settings/services/ServerSettingsMetadata.ts';
 import { useAppTitle } from '@/features/navigation-bar/hooks/useAppTitle.ts';
 import { useNavigationSettings } from '@/features/navigation-bar/NavigationBar.hooks.ts';
+import type { NavbarItem } from '@/features/navigation-bar/NavigationBar.types.ts';
+import { NavBarItemMoreGroup } from '@/features/navigation-bar/NavigationBar.types.ts';
 
 export const More = () => {
     const { t } = useTranslation();
@@ -60,7 +64,7 @@ export const More = () => {
 
     return (
         <List sx={{ p: 0 }}>
-            {Object.entries(hiddenNavBarItemsByMoreGroup).map(([group, items], index, list) => (
+            {Object.entries(finalHiddenNavBarItemsByGroup).map(([group, items], index, list) => (
                 <Fragment key={group}>
                     {items.map((item) => (
                         <Fragment key={item.path}>

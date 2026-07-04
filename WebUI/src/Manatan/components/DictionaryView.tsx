@@ -2,7 +2,18 @@ import React, { useState, useMemo, useCallback, useLayoutEffect, useRef } from '
 import { createPortal } from 'react-dom';
 import { useTheme } from '@mui/material/styles';
 import { useOCR } from '@/Manatan/context/OCRContext';
-import { findNotes, addNote, guiBrowse, imageUrlToBase64Webp, logAnkiError } from '@/Manatan/utils/anki';
+import {
+    findNotes,
+    addNote,
+    guiBrowse,
+    imageUrlToBase64Webp,
+    logAnkiError,
+    mapSentenceFieldValue,
+    notesInfo,
+    calculateUpdatedFields,
+    sentenceFieldNeedsFurigana,
+    updateNote,
+} from '@/Manatan/utils/anki';
 import { lookupYomitan } from '@/Manatan/utils/api';
 import { buildSentenceFuriganaFromLookup } from '@/Manatan/utils/japaneseFurigana';
 import {
@@ -34,7 +45,6 @@ import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline';
 import AddIcon from '@mui/icons-material/Add';
 import SystemUpdateAltIcon from '@mui/icons-material/SystemUpdateAlt';
 import { CropperModal } from '@/Manatan/components/CropperModal';
-import { notesInfo, calculateUpdatedFields, updateNote } from '@/Manatan/utils/anki';
 
 export const StructuredContent: React.FC<{
     contentString: string;
@@ -651,7 +661,7 @@ const AnkiButtons: React.FC<{
             }).join('');
         };
         const sentence = dictPopup.context?.sentence || '';
-        const needsSentenceFurigana = Object.values(map).includes('Sentence Furigana');
+        const needsSentenceFurigana = Object.values(map).some(sentenceFieldNeedsFurigana);
         const sentenceFurigana = needsSentenceFurigana
             ? await buildSentenceFuriganaFromLookup(sentence, lookupYomitan, {
                   language: settings.yomitanLanguage,

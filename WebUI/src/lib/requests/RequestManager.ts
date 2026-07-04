@@ -555,6 +555,9 @@ export class RequestManager {
     }
 
     public clearAnimeExtensionCache() {
+        const settings = (this.serverSettingsSnapshot as any)?.settings;
+        const cacheKeyData = settings?.animeExtensionRepos ?? settings?.extensionRepos ?? [];
+        this.cache.clearFor(this.cache.getKeyFor(ANIME_EXTENSION_LIST_CACHE_KEY, cacheKeyData));
         this.cache.clearFor(this.cache.getKeyFor(ANIME_EXTENSION_LIST_CACHE_KEY, undefined));
     }
 
@@ -700,6 +703,44 @@ export class RequestManager {
               payload?.fetchAnimeExtensions?.extensions ??
               [];
         return items.map((extension: any) => this.normalizeExtensionPayload(extension));
+    }
+
+    private mergeInstalledExtensionState(availableExtensions: any[], runtimeExtensions: any[]) {
+        const isInstalledExtension = (extension: any) =>
+            extension?.isInstalled === true || extension?.installed === true || !!extension?.jarPath;
+        const keyFor = (extension: any) => extension?.pkgName || extension?.apkName || '';
+        const installedExtensions = runtimeExtensions.filter(isInstalledExtension);
+        const installedByKey = new Map(installedExtensions.map((extension) => [keyFor(extension), extension]));
+        const mergedKeys = new Set<string>();
+
+        const mergedExtensions = availableExtensions.map((extension) => {
+            const key = keyFor(extension);
+            const installedExtension = installedByKey.get(key);
+            if (!installedExtension) {
+                return extension;
+            }
+
+            mergedKeys.add(key);
+            return this.normalizeExtensionPayload({
+                ...extension,
+                ...installedExtension,
+                hasUpdate:
+                    extension.hasUpdate ??
+                    extension.has_update ??
+                    installedExtension.hasUpdate ??
+                    installedExtension.has_update ??
+                    false,
+            });
+        });
+
+        for (const extension of installedExtensions) {
+            const key = keyFor(extension);
+            if (key && !mergedKeys.has(key) && !availableExtensions.some((item) => keyFor(item) === key)) {
+                mergedExtensions.push(extension);
+            }
+        }
+
+        return mergedExtensions;
     }
 
     private normalizeSourcePreferencePayload(raw: any): any | null {
@@ -984,7 +1025,13 @@ export class RequestManager {
         const url = refresh ? `${endpoint}?refresh=true` : endpoint;
         const response = await this.restClient.fetcher(url, { config: { signal } });
         const payload = await response.json();
-        const extensions = this.normalizeExtensionsPayload(payload);
+        let extensions = this.normalizeExtensionsPayload(payload);
+        if (anime && refresh) {
+            const runtimeResponse = await this.restClient.fetcher(endpoint, { config: { signal } });
+            const runtimePayload = await runtimeResponse.json();
+            const runtimeExtensions = this.normalizeExtensionsPayload(runtimePayload);
+            extensions = this.mergeInstalledExtensionState(extensions, runtimeExtensions);
+        }
         const cacheKey = anime ? ANIME_EXTENSION_LIST_CACHE_KEY : EXTENSION_LIST_CACHE_KEY;
         const settings = (this.serverSettingsSnapshot as any)?.settings;
         const cacheKeyData = anime
@@ -2190,11 +2237,7 @@ export class RequestManager {
         _options?: MutationHookOptions<any, any>,
     ): AbortableApolloUseMutationResponse<any, any> {
         const [mutate, result] = this.useRestMutation(async (_variables, signal) => {
-            const response = await this.restClient.fetcher('/api/v1/anime/extension/list?refresh=true', {
-                config: { signal },
-            });
-            const payload = await response.json();
-            const extensions = this.normalizeExtensionsPayload(payload);
+            const extensions = await this.refreshExtensionListCache(signal, { refresh: true, anime: true });
             return {
                 fetchAnimeExtensions: {
                     extensions,

@@ -123,6 +123,7 @@ const AnimeHotkeyRow = ({
 const BASE_MAPPING_OPTIONS = [
     'None',
     'Sentence',
+    'Sentence with Bold Word',
     'Sentence Furigana',
     'Sentence Audio',
     'Word Audio',

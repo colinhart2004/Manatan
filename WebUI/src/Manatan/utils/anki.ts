@@ -420,6 +420,41 @@ export const inheritHtmlMarkup = (original: string, markedUp: string) => {
     return inherited;
 };
 
+const boldTargetInSentence = (sentence: string, targetWord: string): string => {
+    const target = targetWord.trim();
+    if (!sentence || !target || !sentence.includes(target)) {
+        return sentence;
+    }
+
+    return inheritHtmlMarkup(sentence, sentence.replace(target, `<b>${target}</b>`));
+};
+
+export const sentenceFieldNeedsFurigana = (mapType: unknown): boolean =>
+    mapType === 'Sentence Furigana' ||
+    mapType === 'SentenceFurigana' ||
+    mapType === 'Sentence Furigana with Bold Word' ||
+    mapType === 'SentenceFurigana with Bold Word';
+
+export const mapSentenceFieldValue = (
+    mapType: unknown,
+    sentence: string,
+    sentenceFurigana: string,
+    targetWord: string,
+): string | null => {
+    if (mapType === 'Sentence') {
+        return sentence;
+    }
+    if (mapType === 'Sentence with Bold Word') {
+        return boldTargetInSentence(sentence, targetWord);
+    }
+    if (sentenceFieldNeedsFurigana(mapType)) {
+        if (mapType === 'Sentence Furigana with Bold Word' || mapType === 'SentenceFurigana with Bold Word') {
+            return inheritHtmlMarkup(sentenceFurigana, boldTargetInSentence(sentence, targetWord));
+        }
+        return sentenceFurigana;
+    }
+    return null;
+};
 
 /**
  * Update the last created Anki card with image and/or sentence

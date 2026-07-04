@@ -91,7 +91,14 @@ import { StructuredContent, DictionaryView } from '@/Manatan/components/Dictiona
 import { PronunciationSection, extractPronunciationData } from '@/Manatan/components/Pronunciation.tsx';
 import { makeToast } from '@/base/utils/Toast.ts';
 import { MediaQuery } from '@/base/utils/MediaQuery.tsx';
-import { addNote, findNotes, guiBrowse, updateLastCard } from '@/Manatan/utils/anki.ts';
+import {
+    addNote,
+    findNotes,
+    guiBrowse,
+    mapSentenceFieldValue,
+    sentenceFieldNeedsFurigana,
+    updateLastCard,
+} from '@/Manatan/utils/anki.ts';
 import {
     AnimeHotkey,
     ANIME_HOTKEYS,
@@ -2803,7 +2810,7 @@ export const AnimeVideoPlayer = ({
             const map = settings.ankiFieldMap || {};
             const fields: Record<string, string> = {};
             const sentence = dictionaryContext?.sentence || '';
-            const needsSentenceFurigana = Object.values(map).includes('Sentence Furigana');
+            const needsSentenceFurigana = Object.values(map).some(sentenceFieldNeedsFurigana);
             const sentenceFurigana = needsSentenceFurigana
                 ? await buildSentenceFuriganaFromLookup(sentence, lookupYomitan, {
                       language: settings.yomitanLanguage,

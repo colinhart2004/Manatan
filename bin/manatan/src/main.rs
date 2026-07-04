@@ -1,7 +1,8 @@
 mod io;
 
 use std::{
-    collections::HashMap,
+    cmp::Ordering as CmpOrdering,
+    collections::{BTreeMap, HashMap},
     env,
     fs::{self},
     io::Read,
@@ -14,7 +15,7 @@ use std::{
         mpsc::{Receiver, Sender},
     },
     thread,
-    time::Duration,
+    time::{Duration, UNIX_EPOCH},
 };
 
 use anyhow::anyhow;
@@ -49,7 +50,7 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tokio::sync::Mutex as AsyncMutex;
 use tower_http::cors::{AllowOrigin, CorsLayer};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[cfg(feature = "embed-jre")]
@@ -103,6 +104,37 @@ struct DownloadManifest {
     pages: Vec<String>,
     #[serde(default)]
     archive_file: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct LocalMangaArchiveShimSummary {
+    scanned_archives: usize,
+    planned_archives: usize,
+    planned_folders: usize,
+    copied_archives: usize,
+    refreshed_folders: usize,
+    skipped_archives: usize,
+}
+
+#[derive(Debug)]
+struct LocalMangaArchivePlan {
+    source_path: PathBuf,
+    target_dir: PathBuf,
+    archive_name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct LocalMangaFileMap {
+    chapters: BTreeMap<String, Vec<LocalMangaFileMapPage>>,
+}
+
+#[derive(Debug, Serialize)]
+struct LocalMangaFileMapPage {
+    page_index: usize,
+    file_key: String,
+    file_hash: String,
+    file_size: u64,
+    modified_at: u128,
 }
 
 static ICON_BYTES: &[u8] = include_bytes!("../resources/faviconlogo.png");
@@ -249,6 +281,612 @@ fn resolve_path_option(
     }
     .to_string_lossy()
     .to_string()
+}
+
+fn run_local_manga_archive_shim(
+    local_manga_dir: &Path,
+) -> anyhow::Result<LocalMangaArchiveShimSummary> {
+    let mut summary = LocalMangaArchiveShimSummary::default();
+    if !local_manga_dir.is_dir() {
+        return Ok(summary);
+    }
+
+    let mut plans_by_target: BTreeMap<PathBuf, Vec<LocalMangaArchivePlan>> = BTreeMap::new();
+    for entry in fs::read_dir(local_manga_dir)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        if !source_path.is_file() || !is_local_manga_archive(&source_path) {
+            continue;
+        }
+        summary.scanned_archives += 1;
+
+        match create_local_manga_archive_plan(local_manga_dir, &source_path) {
+            Ok(plan) => {
+                summary.planned_archives += 1;
+                debug!(
+                    "Local manga archive shim planned {} -> {}",
+                    source_path.display(),
+                    plan.target_dir.display()
+                );
+                plans_by_target
+                    .entry(plan.target_dir.clone())
+                    .or_default()
+                    .push(plan);
+            }
+            Err(err) => {
+                summary.skipped_archives += 1;
+                warn!(
+                    "Skipping local manga archive {}: {err}",
+                    source_path.display()
+                );
+            }
+        }
+    }
+    summary.planned_folders = plans_by_target.len();
+
+    for (target_dir, mut plans) in plans_by_target {
+        plans.sort_by(|left, right| natural_cmp(&left.archive_name, &right.archive_name));
+        let folder_needs_refresh = plans.iter().any(|plan| {
+            let target_archive = target_dir.join(&plan.archive_name);
+            !local_manga_regular_file_exists(&target_archive)
+                || !files_have_same_contents(&plan.source_path, &target_archive).unwrap_or(false)
+                || local_manga_filemap_needs_refresh(
+                    &target_dir.join(".manatan-local-filemap.json"),
+                )
+                || find_cover_file(&target_dir).is_none()
+        });
+
+        if !folder_needs_refresh {
+            debug!(
+                "Local manga archive shim found existing converted folder {}",
+                target_dir.display()
+            );
+            summary.skipped_archives += plans.len();
+            continue;
+        }
+
+        let group_result = (|| -> anyhow::Result<usize> {
+            fs::create_dir_all(&target_dir)?;
+            let mut copied_archives = 0;
+            for plan in &plans {
+                let target_archive = target_dir.join(&plan.archive_name);
+                if !local_manga_regular_file_exists(&target_archive)
+                    || !files_have_same_contents(&plan.source_path, &target_archive)
+                        .unwrap_or(false)
+                {
+                    fs::copy(
+                        local_manga_fs_path(&plan.source_path),
+                        local_manga_fs_path(&target_archive),
+                    )?;
+                    copied_archives += 1;
+                }
+            }
+
+            refresh_local_manga_folder(&target_dir)?;
+            Ok(copied_archives)
+        })();
+
+        match group_result {
+            Ok(copied_archives) => {
+                summary.copied_archives += copied_archives;
+                summary.refreshed_folders += 1;
+            }
+            Err(err) => {
+                summary.skipped_archives += plans.len();
+                warn!(
+                    "Skipping local manga folder {}: {err}",
+                    target_dir.display()
+                );
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
+fn create_local_manga_archive_plan(
+    local_manga_dir: &Path,
+    source_path: &Path,
+) -> anyhow::Result<LocalMangaArchivePlan> {
+    let archive_name = source_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("archive filename is not valid UTF-8"))?
+        .to_string();
+    let archive_stem = source_path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&archive_name);
+
+    let file = fs::File::open(local_manga_fs_path(source_path))?;
+    let mut archive = zip::ZipArchive::new(file)?;
+    let image_entries = list_archive_image_entries(&mut archive)?;
+    if image_entries.is_empty() {
+        return Err(anyhow!("archive has no supported image entries"));
+    }
+
+    let metadata_title = read_archive_entry_by_basename(&mut archive, "meta.json")
+        .ok()
+        .flatten()
+        .and_then(|bytes| local_manga_title_from_meta_json(&bytes));
+    let comic_title = read_archive_entry_by_basename(&mut archive, "ComicInfo.xml")
+        .ok()
+        .flatten()
+        .and_then(|bytes| local_manga_title_from_comic_info(&bytes));
+    let fallback_title = title_from_archive_stem(archive_stem);
+    let title = metadata_title
+        .or(comic_title)
+        .unwrap_or(fallback_title)
+        .trim()
+        .to_string();
+    let folder_name = sanitize_local_manga_folder_name(&title).unwrap_or_else(|| {
+        sanitize_local_manga_folder_name(archive_stem).unwrap_or_else(|| "Manga".to_string())
+    });
+
+    Ok(LocalMangaArchivePlan {
+        source_path: source_path.to_path_buf(),
+        target_dir: local_manga_dir.join(folder_name),
+        archive_name,
+    })
+}
+
+fn refresh_local_manga_folder(target_dir: &Path) -> anyhow::Result<()> {
+    let folder_name = target_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("local manga folder name is not valid UTF-8"))?
+        .to_string();
+    let mut archives = fs::read_dir(target_dir)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| local_manga_regular_file_exists(path) && is_local_manga_archive(path))
+        .collect::<Vec<_>>();
+    archives.sort_by(|left, right| {
+        natural_cmp(
+            &path_file_name_for_sort(left),
+            &path_file_name_for_sort(right),
+        )
+    });
+
+    let mut chapters = BTreeMap::new();
+    let mut cover_written = false;
+    let mut comic_info_written = false;
+
+    for archive_path in archives {
+        let archive_name = archive_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| anyhow!("archive filename is not valid UTF-8"))?
+            .to_string();
+        let archive_metadata = fs::metadata(local_manga_fs_path(&archive_path))?;
+        let archive_file_size = archive_metadata.len();
+        let archive_modified_at = metadata_modified_at_nanos(&archive_metadata);
+        let archive_key_path = archive_path.clone();
+
+        let file = fs::File::open(local_manga_fs_path(&archive_path))?;
+        let mut archive = zip::ZipArchive::new(file)?;
+        let image_entries = list_archive_image_entries(&mut archive)?;
+        if image_entries.is_empty() {
+            continue;
+        }
+
+        if !cover_written {
+            let cover_entry = &image_entries[0];
+            let cover_ext = extension_for_archive_entry(cover_entry)
+                .map(|extension| extension.to_ascii_lowercase())
+                .unwrap_or_else(|| "jpg".to_string());
+            let cover_path = target_dir.join(format!("cover.{cover_ext}"));
+            let cover_bytes = read_archive_entry_bytes(&mut archive, cover_entry)?;
+            write_if_changed(&cover_path, &cover_bytes)?;
+            cover_written = true;
+        }
+
+        if !comic_info_written
+            && let Some(bytes) = read_archive_entry_by_basename(&mut archive, "ComicInfo.xml")?
+        {
+            write_if_changed(&target_dir.join("ComicInfo.xml"), &bytes)?;
+            comic_info_written = true;
+        }
+
+        let mut pages = Vec::with_capacity(image_entries.len());
+        for (page_index, image_entry) in image_entries.iter().enumerate() {
+            let bytes = read_archive_entry_bytes(&mut archive, image_entry)?;
+            pages.push(LocalMangaFileMapPage {
+                page_index,
+                file_key: format!("zip:{}::{image_entry}", archive_key_path.display()),
+                file_hash: fingerprint_bytes_64(&bytes),
+                file_size: archive_file_size,
+                modified_at: archive_modified_at,
+            });
+        }
+
+        chapters.insert(format!("{folder_name}/{archive_name}"), pages);
+    }
+
+    if chapters.is_empty() {
+        return Ok(());
+    }
+
+    let file_map = LocalMangaFileMap { chapters };
+    let bytes = serde_json::to_vec_pretty(&file_map)?;
+    write_if_changed(&target_dir.join(".manatan-local-filemap.json"), &bytes)?;
+    Ok(())
+}
+
+fn is_local_manga_archive(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| matches!(extension.to_ascii_lowercase().as_str(), "zip" | "cbz"))
+        .unwrap_or(false)
+}
+
+fn local_manga_fs_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let value = path.as_os_str().to_string_lossy();
+        if value.starts_with(r"\\?\") {
+            return path.to_path_buf();
+        }
+        if let Some(unc_path) = value.strip_prefix(r"\\") {
+            return PathBuf::from(format!(r"\\?\UNC\{unc_path}"));
+        }
+        if path.is_absolute() {
+            return PathBuf::from(format!(r"\\?\{value}"));
+        }
+    }
+
+    path.to_path_buf()
+}
+
+fn local_manga_regular_file_exists(path: &Path) -> bool {
+    fs::metadata(local_manga_fs_path(path))
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false)
+}
+
+fn local_manga_filemap_needs_refresh(path: &Path) -> bool {
+    if !local_manga_regular_file_exists(path) {
+        return true;
+    }
+
+    fs::read_to_string(local_manga_fs_path(path))
+        .map(|text| text.contains(r#"zip:\\\\?\\"#))
+        .unwrap_or(true)
+}
+
+fn list_archive_image_entries(
+    archive: &mut zip::ZipArchive<fs::File>,
+) -> anyhow::Result<Vec<String>> {
+    let mut entries = Vec::new();
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index)?;
+        let name = entry.name().to_string();
+        if entry.is_dir()
+            || !is_supported_local_manga_image(&name)
+            || is_ignored_archive_entry(&name)
+        {
+            continue;
+        }
+        entries.push(name);
+    }
+    entries.sort_by(|left, right| natural_cmp(left, right));
+    Ok(entries)
+}
+
+fn read_archive_entry_by_basename(
+    archive: &mut zip::ZipArchive<fs::File>,
+    basename: &str,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    let mut matched_name = None;
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index)?;
+        if entry.is_dir() {
+            continue;
+        }
+        let name = entry.name().to_string();
+        if archive_entry_basename(&name).eq_ignore_ascii_case(basename) {
+            matched_name = Some(name);
+            break;
+        }
+    }
+
+    matched_name
+        .map(|name| read_archive_entry_bytes(archive, &name))
+        .transpose()
+}
+
+fn read_archive_entry_bytes(
+    archive: &mut zip::ZipArchive<fs::File>,
+    entry_name: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let mut entry = archive.by_name(entry_name)?;
+    let mut bytes = Vec::with_capacity(entry.size().try_into().unwrap_or(0));
+    entry.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn is_supported_local_manga_image(name: &str) -> bool {
+    extension_for_archive_entry(name)
+        .map(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "jpg" | "jpeg" | "png" | "webp" | "gif" | "bmp" | "avif" | "jxl"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn is_ignored_archive_entry(name: &str) -> bool {
+    name.split(['/', '\\']).any(|component| {
+        component.eq_ignore_ascii_case("__MACOSX")
+            || component.eq_ignore_ascii_case(".DS_Store")
+            || component.eq_ignore_ascii_case("Thumbs.db")
+    })
+}
+
+fn extension_for_archive_entry(name: &str) -> Option<&str> {
+    archive_entry_basename(name)
+        .rsplit_once('.')
+        .map(|(_, extension)| extension)
+        .map(str::trim)
+        .filter(|extension| !extension.is_empty())
+}
+
+fn archive_entry_basename(name: &str) -> &str {
+    name.rsplit(['/', '\\']).next().unwrap_or(name)
+}
+
+fn local_manga_title_from_meta_json(bytes: &[u8]) -> Option<String> {
+    let value = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
+    let title = value.get("title")?;
+    ["japanese", "english", "pretty", "romaji"]
+        .iter()
+        .filter_map(|key| title.get(*key)?.as_str())
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn local_manga_title_from_comic_info(bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let series = extract_xml_tag_text(text, "Series")
+        .filter(|value| !value.eq_ignore_ascii_case("original"));
+    series
+        .or_else(|| extract_xml_tag_text(text, "Title"))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn extract_xml_tag_text(text: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = text.find(&open)? + open.len();
+    let end = text[start..].find(&close)? + start;
+    Some(unescape_minimal_xml(&text[start..end]))
+}
+
+fn unescape_minimal_xml(value: &str) -> String {
+    value
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+}
+
+fn title_from_archive_stem(stem: &str) -> String {
+    let (mut title, chapter_number) = strip_chapter_prefix(stem);
+    if let Some(chapter_number) = chapter_number {
+        title = strip_matching_trailing_number(&title, &chapter_number);
+    }
+    title.trim().to_string()
+}
+
+fn strip_chapter_prefix(stem: &str) -> (String, Option<String>) {
+    let trimmed = stem.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("chapter ") {
+        return (trimmed.to_string(), None);
+    }
+
+    let Some(separator_index) = trimmed.find(" - ") else {
+        return (trimmed.to_string(), None);
+    };
+    let chapter_number = trimmed["chapter ".len()..separator_index].trim();
+    if chapter_number.is_empty()
+        || !chapter_number
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || matches!(ch, '.' | ' '))
+    {
+        return (trimmed.to_string(), None);
+    }
+
+    (
+        trimmed[separator_index + " - ".len()..].trim().to_string(),
+        Some(chapter_number.to_string()),
+    )
+}
+
+fn strip_matching_trailing_number(title: &str, chapter_number: &str) -> String {
+    let Some((prefix, trailing)) = title.rsplit_once(' ') else {
+        return title.to_string();
+    };
+    if normalize_chapter_number(trailing) == normalize_chapter_number(chapter_number) {
+        prefix.trim().to_string()
+    } else {
+        title.to_string()
+    }
+}
+
+fn normalize_chapter_number(value: &str) -> String {
+    let normalized = value.trim().trim_start_matches('0');
+    if normalized.is_empty() {
+        "0".to_string()
+    } else {
+        normalized.to_string()
+    }
+}
+
+fn sanitize_local_manga_folder_name(value: &str) -> Option<String> {
+    let sanitized = value
+        .chars()
+        .map(|ch| {
+            if ch.is_control() || matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+            {
+                '_'
+            } else {
+                ch
+            }
+        })
+        .collect::<String>()
+        .trim()
+        .trim_matches('.')
+        .trim()
+        .to_string();
+
+    (!sanitized.is_empty()).then_some(sanitized)
+}
+
+fn find_cover_file(target_dir: &Path) -> Option<PathBuf> {
+    fs::read_dir(target_dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .find_map(|entry| {
+            let path = entry.path();
+            let file_name = path.file_name()?.to_str()?;
+            (path.is_file() && file_name.to_ascii_lowercase().starts_with("cover.")).then_some(path)
+        })
+}
+
+fn write_if_changed(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let fs_path = local_manga_fs_path(path);
+    if local_manga_regular_file_exists(path)
+        && let Ok(existing) = fs::read(&fs_path)
+        && existing == bytes
+    {
+        return Ok(());
+    }
+    fs::write(fs_path, bytes)
+}
+
+fn files_have_same_contents(left: &Path, right: &Path) -> std::io::Result<bool> {
+    let left_fs_path = local_manga_fs_path(left);
+    let right_fs_path = local_manga_fs_path(right);
+    let left_metadata = fs::metadata(&left_fs_path)?;
+    let right_metadata = fs::metadata(&right_fs_path)?;
+    if left_metadata.len() != right_metadata.len() {
+        return Ok(false);
+    }
+
+    let mut left_file = fs::File::open(left_fs_path)?;
+    let mut right_file = fs::File::open(right_fs_path)?;
+    let mut left_buffer = [0_u8; 64 * 1024];
+    let mut right_buffer = [0_u8; 64 * 1024];
+
+    loop {
+        let left_read = left_file.read(&mut left_buffer)?;
+        let right_read = right_file.read(&mut right_buffer)?;
+        if left_read != right_read {
+            return Ok(false);
+        }
+        if left_read == 0 {
+            return Ok(true);
+        }
+        if left_buffer[..left_read] != right_buffer[..right_read] {
+            return Ok(false);
+        }
+    }
+}
+
+fn metadata_modified_at_nanos(metadata: &fs::Metadata) -> u128 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .unwrap_or_else(|| Duration::from_secs(0))
+        .as_nanos()
+}
+
+fn fingerprint_bytes_64(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn path_file_name_for_sort(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn natural_cmp(left: &str, right: &str) -> CmpOrdering {
+    let left_chars = left.chars().collect::<Vec<_>>();
+    let right_chars = right.chars().collect::<Vec<_>>();
+    let mut left_index = 0;
+    let mut right_index = 0;
+
+    while left_index < left_chars.len() && right_index < right_chars.len() {
+        let left_char = left_chars[left_index];
+        let right_char = right_chars[right_index];
+
+        if left_char.is_ascii_digit() && right_char.is_ascii_digit() {
+            let left_start = left_index;
+            let right_start = right_index;
+            while left_index < left_chars.len() && left_chars[left_index].is_ascii_digit() {
+                left_index += 1;
+            }
+            while right_index < right_chars.len() && right_chars[right_index].is_ascii_digit() {
+                right_index += 1;
+            }
+            let left_digits = left_chars[left_start..left_index]
+                .iter()
+                .collect::<String>();
+            let right_digits = right_chars[right_start..right_index]
+                .iter()
+                .collect::<String>();
+            let left_trimmed = left_digits.trim_start_matches('0');
+            let right_trimmed = right_digits.trim_start_matches('0');
+            let left_number = if left_trimmed.is_empty() {
+                "0"
+            } else {
+                left_trimmed
+            };
+            let right_number = if right_trimmed.is_empty() {
+                "0"
+            } else {
+                right_trimmed
+            };
+
+            match left_number.len().cmp(&right_number.len()) {
+                CmpOrdering::Equal => match left_number.cmp(right_number) {
+                    CmpOrdering::Equal => match left_digits.len().cmp(&right_digits.len()) {
+                        CmpOrdering::Equal => {}
+                        ordering => return ordering,
+                    },
+                    ordering => return ordering,
+                },
+                ordering => return ordering,
+            }
+            continue;
+        }
+
+        match left_char
+            .to_ascii_lowercase()
+            .cmp(&right_char.to_ascii_lowercase())
+        {
+            CmpOrdering::Equal => {
+                left_index += 1;
+                right_index += 1;
+            }
+            ordering => return ordering,
+        }
+    }
+
+    left_chars.len().cmp(&right_chars.len())
 }
 
 fn resolve_data_dir() -> PathBuf {
@@ -1043,7 +1681,9 @@ async fn run_server(
     if !data_dir.exists() {
         fs::create_dir_all(data_dir).map_err(|err| anyhow!("Failed to create data dir {err:?}"))?;
     }
-    let local_manga_dir = data_dir.join("local-manga");
+    let local_manga_path =
+        resolve_path_option(cli.local_manga_path.as_ref(), data_dir, "local-manga");
+    let local_manga_dir = PathBuf::from(&local_manga_path);
     if !local_manga_dir.exists()
         && let Err(err) = fs::create_dir_all(&local_manga_dir)
     {
@@ -1052,6 +1692,23 @@ async fn run_server(
             local_manga_dir.display()
         );
     }
+    match run_local_manga_archive_shim(&local_manga_dir) {
+        Ok(summary) => {
+            if summary.scanned_archives > 0 {
+                info!(
+                    "📚 Local manga archive shim scanned {} archive(s), planned {} archive(s) across {} folder(s), copied {} archive(s), refreshed {} folder(s), skipped {} archive(s).",
+                    summary.scanned_archives,
+                    summary.planned_archives,
+                    summary.planned_folders,
+                    summary.copied_archives,
+                    summary.refreshed_folders,
+                    summary.skipped_archives
+                );
+            }
+        }
+        Err(err) => warn!("Local manga archive shim failed: {err}"),
+    }
+
     let local_anime_dir = data_dir.join("local-anime");
     if !local_anime_dir.exists()
         && let Err(err) = fs::create_dir_all(&local_anime_dir)
@@ -1197,8 +1854,6 @@ async fn run_server(
     let aidoku_index_url = cli.aidoku_index_url.clone().unwrap_or_default();
     let aidoku_enabled = cli.aidoku_enabled;
     let aidoku_cache_path = resolve_path_option(cli.aidoku_cache_path.as_ref(), data_dir, "aidoku");
-    let local_manga_path =
-        resolve_path_option(cli.local_manga_path.as_ref(), data_dir, "local-manga");
     let local_anime_path =
         resolve_path_option(cli.local_anime_path.as_ref(), data_dir, "local-anime");
     let local_novel_path_str =
@@ -2001,6 +2656,41 @@ mod tests {
             Some("image/webp")
         );
         assert_eq!(sniff_image_content_type(b"PK\x03\x04"), None);
+    }
+
+    #[test]
+    fn sorts_local_manga_archive_entries_naturally() {
+        let mut entries = vec![
+            "page10.webp".to_string(),
+            "page2.webp".to_string(),
+            "page001.webp".to_string(),
+        ];
+
+        entries.sort_by(|left, right| natural_cmp(left, right));
+
+        assert_eq!(entries, vec!["page001.webp", "page2.webp", "page10.webp"]);
+    }
+
+    #[test]
+    fn derives_local_manga_title_from_chapter_archive_stem() {
+        assert_eq!(
+            title_from_archive_stem("Chapter 001 - Example Manga 001"),
+            "Example Manga"
+        );
+        assert_eq!(
+            title_from_archive_stem("Chapter 10 - Example Manga 11"),
+            "Example Manga 11"
+        );
+    }
+
+    #[test]
+    fn prefers_local_manga_meta_json_title() {
+        let bytes = br#"{"title":{"japanese":"Japanese Name","english":"English Name"}}"#;
+
+        assert_eq!(
+            local_manga_title_from_meta_json(bytes),
+            Some("Japanese Name".to_string())
+        );
     }
 
     #[test]

@@ -186,3 +186,13 @@ yarn-error.log*
 !.env.example
 
 ocr-test-data
+
+# Local Codex scratch state and tool downloads
+.codex/
+
+# Local media used while testing transcoding behavior
+amf-map-test.mkv
+
+# .NET build output for the ffmpeg HLS wrapper tool
+tools/ffmpeg-hls-wrapper/bin/
+tools/ffmpeg-hls-wrapper/obj/

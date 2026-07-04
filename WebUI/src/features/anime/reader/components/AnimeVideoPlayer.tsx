@@ -67,7 +67,7 @@ import { useOCR } from '@/Manatan/context/OCRContext.tsx';
 import ManatanLogo from '@/Manatan/assets/manatan_logo.png';
 import { cleanPunctuation, lookupYomitan } from '@/Manatan/utils/api.ts';
 import { buildSentenceFuriganaFromLookup } from '@/Manatan/utils/japaneseFurigana';
-import { buildScopedCustomCss } from '@/Manatan/utils/customCss';
+import { buildAnkiDefinitionHtml, buildScopedCustomCss } from '@/Manatan/utils/customCss';
 import {
     getWordAudioFilename,
     getWordAudioSourceLabel,
@@ -519,7 +519,23 @@ const getTermTagLabel = (tag: unknown): string => {
     return '';
 };
 
-const buildDefinitionHtml = (entry: DictionaryResult, dictionaryName?: string): string => {
+const buildDefinitionHtml = (
+    entry: DictionaryResult,
+    dictionaryName?: string,
+    options: {
+        customCss?: string;
+        themeClassName?: string;
+        wrapperClassName?: string;
+        wrapperSelector?: string;
+    } = {},
+): string => {
+    const escapeHtmlAttr = (value: string): string =>
+        value
+            .replace(/&/g, '&amp;')
+            .replace(/"/g, '&quot;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+
     const styleToString = (style: Record<string, any>): string => {
         if (!style) {
             return '';
@@ -548,11 +564,15 @@ const buildDefinitionHtml = (entry: DictionaryResult, dictionaryName?: string): 
 
         const { tag, content, style, href, data } = node;
         const customStyle = styleToString(style);
+        const yomitanClass = tag ? `gloss-sc-${tag}` : '';
+        const dictClass = typeof data?.class === 'string' ? data.class : '';
+        const className = [yomitanClass, dictClass].filter(Boolean).join(' ');
+        const classAttrString = className ? ` class="${escapeHtmlAttr(className)}"` : '';
 
         const dataAttrs = data && typeof data === 'object'
             ? Object.entries(data)
                 .filter(([_, v]) => typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean')
-                .map(([k, v]) => `data-sc-${k}="${v}"`)
+                .map(([k, v]) => `data-sc-${k}="${escapeHtmlAttr(String(v))}"`)
                 .join(' ')
             : '';
 
@@ -563,36 +583,37 @@ const buildDefinitionHtml = (entry: DictionaryResult, dictionaryName?: string): 
             : '';
 
         const dataAttrString = dataAttrs ? ' ' + dataAttrs : '';
+        const htmlAttrs = `${dataAttrString}${classAttrString}`;
 
         if (tag === 'ul') {
-            return `<ul style="padding-left: 20px; margin: 2px 0; list-style-type: disc;${customStyle}"${dataAttrString}>${generateHTML(content)}</ul>`;
+            return `<ul style="padding-left: 20px; margin: 2px 0; list-style-type: disc;${customStyle}"${htmlAttrs}>${generateHTML(content)}</ul>`;
         }
         if (tag === 'ol') {
-            return `<ol style="padding-left: 20px; margin: 2px 0; list-style-type: decimal;${customStyle}"${dataAttrString}>${generateHTML(content)}</ol>`;
+            return `<ol style="padding-left: 20px; margin: 2px 0; list-style-type: decimal;${customStyle}"${htmlAttrs}>${generateHTML(content)}</ol>`;
         }
         if (tag === 'li') {
-            return `<li style="${customStyle}"${dataAttrString}>${generateHTML(content)}</li>`;
+            return `<li style="${customStyle}"${htmlAttrs}>${generateHTML(content)}</li>`;
         }
         if (tag === 'table') {
-            return `<table style="border-collapse: collapse; width: 100%; border: 1px solid #777;${customStyle}"${dataAttrString}><tbody>${generateHTML(content)}</tbody></table>`;
+            return `<table style="border-collapse: collapse; width: 100%; border: 1px solid #777;${customStyle}"${htmlAttrs}><tbody>${generateHTML(content)}</tbody></table>`;
         }
         if (tag === 'tr') {
-            return `<tr style="${customStyle}"${dataAttrString}>${generateHTML(content)}</tr>`;
+            return `<tr style="${customStyle}"${htmlAttrs}>${generateHTML(content)}</tr>`;
         }
         if (tag === 'th') {
-            return `<th style="border: 1px solid #777; padding: 2px 8px; text-align: center; font-weight: bold;${customStyle}"${dataAttrString}>${generateHTML(content)}</th>`;
+            return `<th style="border: 1px solid #777; padding: 2px 8px; text-align: center; font-weight: bold;${customStyle}"${htmlAttrs}>${generateHTML(content)}</th>`;
         }
         if (tag === 'td') {
-            return `<td style="border: 1px solid #777; padding: 2px 8px; text-align: center;${customStyle}"${dataAttrString}>${generateHTML(content)}</td>`;
+            return `<td style="border: 1px solid #777; padding: 2px 8px; text-align: center;${customStyle}"${htmlAttrs}>${generateHTML(content)}</td>`;
         }
         if (tag === 'span') {
-            return `<span style="${tagClassStyle}${customStyle}"${dataAttrString}>${generateHTML(content)}</span>`;
+            return `<span style="${tagClassStyle}${customStyle}"${htmlAttrs}>${generateHTML(content)}</span>`;
         }
         if (tag === 'div') {
-            return `<div style="${customStyle}"${dataAttrString}>${generateHTML(content)}</div>`;
+            return `<div style="${customStyle}"${htmlAttrs}>${generateHTML(content)}</div>`;
         }
         if (tag === 'a') {
-            return `<a href="${href}" target="_blank" style="text-decoration: underline;${customStyle}"${dataAttrString}>${generateHTML(content)}</a>`;
+            return `<a href="${escapeHtmlAttr(href || '')}" target="_blank" style="text-decoration: underline;${customStyle}"${htmlAttrs}>${generateHTML(content)}</a>`;
         }
 
         return generateHTML(content);
@@ -604,35 +625,45 @@ const buildDefinitionHtml = (entry: DictionaryResult, dictionaryName?: string): 
     if (!glossaryEntries.length) {
         return '';
     }
-    return glossaryEntries
+    const dictionaryNames = Array.from(new Set(glossaryEntries.map((def) => def.dictionaryName)));
+    const contentHtml = glossaryEntries
         .map((def, idx) => {
             const tagsHTML = normalizeTagList(def.tags ?? []).map(
                 (tag) =>
-                    `<span style="display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 0.75em; font-weight: bold; margin-right: 6px; color: #fff; background-color: #666; vertical-align: middle;">${tag}</span>`,
+                    `<span class="tag" style="display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 0.75em; font-weight: bold; margin-right: 6px; color: #fff; background-color: #666; vertical-align: middle;"><span class="tag-label">${tag}</span></span>`,
             );
-            const dictHTML = `<i>(${def.dictionaryName})</i>`;
+            const dictHTML = `<span class="tag tag-label" style="display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 0.75em; font-weight: bold; margin-right: 6px; color: #fff; background-color: #666; vertical-align: middle;">${def.dictionaryName}</span>`;
             const headerHTML = [...tagsHTML, dictHTML].join(' ');
             const contentHTML = def.content
                 .map((content) => {
                     try {
                         const parsed = JSON.parse(content);
-                        return generateHTML(parsed);
+                        return `<div style="margin-bottom: 2px;">${generateHTML(parsed)}</div>`;
                     } catch {
-                        return content;
+                        return `<div style="margin-bottom: 2px;">${content}</div>`;
                     }
                 })
                 .join('');
             return `
-                <div style="margin-bottom: 12px; display: flex;">
-                    <div style="flex-shrink: 0; width: 24px; font-weight: bold;">${idx + 1}.</div>
-                    <div style="flex-grow: 1;">
-                        <div style="margin-bottom: 4px;">${headerHTML}</div>
-                        <div>${contentHTML}</div>
+                <div class="gloss-item definition-item" data-dictionary="${escapeHtmlAttr(def.dictionaryName)}" style="margin-bottom: 12px; display: flex;">
+                    <div style="flex-shrink: 0; width: 24px; font-weight: bold;"><span class="gloss-separator">${idx + 1}.</span></div>
+                    <div style="flex-grow: 1;" class="definition-item-inner definition-item-content">
+                        <div style="margin-bottom: 4px;" class="definition-tag-list tag-list">${headerHTML}</div>
+                        <div style="white-space: pre-wrap;" class="gloss-content">${contentHTML}</div>
                     </div>
                 </div>
             `;
         })
         .join('');
+
+    return buildAnkiDefinitionHtml(contentHtml, {
+        customCss: options.customCss,
+        dictionaryNames,
+        dictionaryStyles: entry.styles,
+        themeClassName: options.themeClassName,
+        wrapperClassName: options.wrapperClassName ?? 'anime-dictionary-popup yomitan-popup',
+        wrapperSelector: options.wrapperSelector ?? '.anki-dictionary-view.anime-dictionary-popup',
+    });
 };
 
 const getDictionaryEntryKey = (entry: DictionaryResult) => `${entry.headword}::${entry.reading}`;
@@ -2810,6 +2841,12 @@ export const AnimeVideoPlayer = ({
             const map = settings.ankiFieldMap || {};
             const fields: Record<string, string> = {};
             const sentence = dictionaryContext?.sentence || '';
+            const definitionHtmlOptions = {
+                customCss: settings.animePopupCustomCss,
+                themeClassName: settings.animePopupTheme === 'light' ? 'yomitan-popup-light' : 'yomitan-popup-dark',
+                wrapperClassName: 'anime-dictionary-popup yomitan-popup',
+                wrapperSelector: '.anki-dictionary-view.anime-dictionary-popup',
+            };
             const needsSentenceFurigana = Object.values(map).some(sentenceFieldNeedsFurigana);
             const sentenceFurigana = needsSentenceFurigana
                 ? await buildSentenceFuriganaFromLookup(sentence, lookupYomitan, {
@@ -2862,7 +2899,7 @@ export const AnimeVideoPlayer = ({
                     fields[ankiField] = generateAnkiPitchAccentCategories(entry);
                 }
                 else if (mapType === 'Definition' || mapType === 'Glossary') {
-                    fields[ankiField] = buildDefinitionHtml(entry);
+                    fields[ankiField] = buildDefinitionHtml(entry, undefined, definitionHtmlOptions);
                 }
                 else if (mapType === 'Frequency') fields[ankiField] = getLowestFrequency(entry);
                 else if (mapType === 'Harmonic Frequency') fields[ankiField] = getHarmonicMeanFrequency(entry);
@@ -2875,7 +2912,7 @@ export const AnimeVideoPlayer = ({
                 else if (typeof mapType === 'string') {
                     const name = getSingleGlossaryName(mapType);
                     if (name) {
-                        fields[ankiField] = buildDefinitionHtml(entry, name);
+                        fields[ankiField] = buildDefinitionHtml(entry, name, definitionHtmlOptions);
                     }
                 }
             });

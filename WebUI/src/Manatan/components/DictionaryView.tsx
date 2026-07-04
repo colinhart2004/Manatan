@@ -16,6 +16,7 @@ import {
 } from '@/Manatan/utils/anki';
 import { lookupYomitan } from '@/Manatan/utils/api';
 import { buildSentenceFuriganaFromLookup } from '@/Manatan/utils/japaneseFurigana';
+import { buildAnkiDefinitionHtml } from '@/Manatan/utils/customCss';
 import {
     getWordAudioFilename,
     getWordAudioSourceLabel,
@@ -479,6 +480,12 @@ const AnkiButtons: React.FC<{
             }
             return null;
         };
+        const escapeHtmlAttr = (value: string): string =>
+            value
+                .replace(/&/g, '&amp;')
+                .replace(/"/g, '&quot;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
         const styleToString = (style: any) => {
             if (!style) return '';
             return Object.entries(style).map(([k, v]) => {
@@ -635,30 +642,39 @@ const AnkiButtons: React.FC<{
                 ? entry.glossary.filter((def) => def.dictionaryName === dictionaryName)
                 : entry.glossary;
             if (!glossaryEntries.length) return '';
-            return glossaryEntries.map((def, idx) => {
+            const dictionaryNames = Array.from(new Set(glossaryEntries.map((def) => def.dictionaryName)));
+            const contentHtml = glossaryEntries.map((def, idx) => {
                 const tagsHTML = normalizeTagList(def.tags).map((t) =>
-                    `<span style="display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 0.75em; font-weight: bold; margin-right: 6px; color: #fff; background-color: #666; vertical-align: middle;">${t}</span>`
+                    `<span class="tag" style="display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 0.75em; font-weight: bold; margin-right: 6px; color: #fff; background-color: #666; vertical-align: middle;"><span class="tag-label">${t}</span></span>`
                 );
-                const dictHTML = `<i>(${def.dictionaryName})</i>`;
+                const dictHTML = `<span class="tag tag-label" style="display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 0.75em; font-weight: bold; margin-right: 6px; color: #fff; background-color: #666; vertical-align: middle;">${def.dictionaryName}</span>`;
                 const headerHTML = [...tagsHTML, dictHTML].join(' ');
                 const contentHTML = def.content.map((c) => {
                     try {
                         const parsed = JSON.parse(c);
-                        return generateHTML(parsed, def.dictionaryName);
+                        return `<div style="margin-bottom: 2px;">${generateHTML(parsed, def.dictionaryName)}</div>`;
                     } catch {
-                        return c;
+                        return `<div style="margin-bottom: 2px;">${c}</div>`;
                     }
                 }).join('');
                 return `
-                    <div style="margin-bottom: 12px; display: flex;">
-                        <div style="flex-shrink: 0; width: 24px; font-weight: bold;">${idx + 1}.</div>
-                        <div style="flex-grow: 1;">
-                            <div style="margin-bottom: 4px;">${headerHTML}</div>
-                            <div>${contentHTML}</div>
+                    <div class="gloss-item definition-item" data-dictionary="${escapeHtmlAttr(def.dictionaryName)}" style="margin-bottom: 12px; display: flex;">
+                        <div style="flex-shrink: 0; width: 24px; font-weight: bold;"><span class="gloss-separator">${idx + 1}.</span></div>
+                        <div style="flex-grow: 1;" class="definition-item-inner definition-item-content">
+                            <div style="margin-bottom: 4px;" class="definition-tag-list tag-list">${headerHTML}</div>
+                            <div style="white-space: pre-wrap;" class="gloss-content">${contentHTML}</div>
                         </div>
                     </div>
                 `;
             }).join('');
+            return buildAnkiDefinitionHtml(contentHtml, {
+                customCss: settings.yomitanPopupCustomCss,
+                dictionaryNames,
+                dictionaryStyles: entry.styles,
+                themeClassName: settings.yomitanPopupTheme === 'light' ? 'yomitan-popup-light' : 'yomitan-popup-dark',
+                wrapperClassName: 'yomitan-popup',
+                wrapperSelector: '.anki-dictionary-view.yomitan-popup',
+            });
         };
         const sentence = dictPopup.context?.sentence || '';
         const needsSentenceFurigana = Object.values(map).some(sentenceFieldNeedsFurigana);

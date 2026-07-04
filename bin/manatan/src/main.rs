@@ -6,7 +6,7 @@ use std::{
     env,
     fs::{self},
     io::Read,
-    net::{Ipv4Addr, SocketAddr, TcpListener},
+    net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener},
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
@@ -70,8 +70,17 @@ const SUWAYOMI_HTTP_BASE_URL: &str = "http://127.0.0.1:4566";
 const MAX_PAGES_RESPONSE_REWRITE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PAGE_IMAGE_CONTENT_TYPE_REWRITE_BYTES: usize = 64 * 1024 * 1024;
 const MANGA_PAGE_CACHE_BUSTER: &str = "downloadfix2";
+const LOCAL_HTTPS_CERT_FILE: &str = "manatan-local-cert.pem";
+const LOCAL_HTTPS_KEY_FILE: &str = "manatan-local-key.pem";
+const LOCAL_HTTPS_SAN_FILE: &str = "manatan-local-san.txt";
 
 static MANGA_CHAPTER_LOCKS: OnceLock<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>> = OnceLock::new();
+
+#[derive(Debug, Clone)]
+struct TlsPaths {
+    cert_path: PathBuf,
+    key_path: PathBuf,
+}
 
 #[derive(Clone)]
 struct DownloadedMangaFallbackState {
@@ -271,17 +280,16 @@ struct Cli {
 
 impl Cli {
     fn server_scheme(&self) -> &'static str {
-        if self.tls_cert_path.is_some() || self.tls_key_path.is_some() {
-            "https"
-        } else {
-            "http"
-        }
+        "https"
     }
 
-    fn tls_paths(&self) -> anyhow::Result<Option<(&Path, &Path)>> {
+    fn tls_paths(&self, data_dir: &Path) -> anyhow::Result<Option<TlsPaths>> {
         match (self.tls_cert_path.as_deref(), self.tls_key_path.as_deref()) {
-            (Some(cert_path), Some(key_path)) => Ok(Some((cert_path, key_path))),
-            (None, None) => Ok(None),
+            (Some(cert_path), Some(key_path)) => Ok(Some(TlsPaths {
+                cert_path: cert_path.to_path_buf(),
+                key_path: key_path.to_path_buf(),
+            })),
+            (None, None) => Ok(Some(ensure_local_https_config(data_dir, self.host)?)),
             _ => Err(anyhow!(
                 "Both --tls-cert-path and --tls-key-path are required to enable HTTPS"
             )),
@@ -309,6 +317,89 @@ fn resolve_path_option(
     }
     .to_string_lossy()
     .to_string()
+}
+
+fn ensure_local_https_config(data_dir: &Path, bind_host: Ipv4Addr) -> anyhow::Result<TlsPaths> {
+    let cert_dir = data_dir.join("certs");
+    let cert_path = cert_dir.join(LOCAL_HTTPS_CERT_FILE);
+    let key_path = cert_dir.join(LOCAL_HTTPS_KEY_FILE);
+    let san_path = cert_dir.join(LOCAL_HTTPS_SAN_FILE);
+    let subject_alt_names = local_https_subject_alt_names(bind_host);
+    let san_marker = subject_alt_names.join("\n");
+
+    if cert_path.is_file()
+        && key_path.is_file()
+        && fs::read_to_string(&san_path).ok().as_deref() == Some(san_marker.as_str())
+    {
+        return Ok(TlsPaths {
+            cert_path,
+            key_path,
+        });
+    }
+
+    fs::create_dir_all(&cert_dir)
+        .map_err(|err| anyhow!("Failed to create local HTTPS cert directory: {err}"))?;
+
+    let rcgen::CertifiedKey { cert, signing_key } =
+        rcgen::generate_simple_self_signed(subject_alt_names.clone())
+            .map_err(|err| anyhow!("Failed to generate local HTTPS certificate: {err}"))?;
+    fs::write(&cert_path, cert.pem())
+        .map_err(|err| anyhow!("Failed to write local HTTPS certificate: {err}"))?;
+    fs::write(&key_path, signing_key.serialize_pem())
+        .map_err(|err| anyhow!("Failed to write local HTTPS private key: {err}"))?;
+    fs::write(&san_path, san_marker)
+        .map_err(|err| anyhow!("Failed to write local HTTPS certificate metadata: {err}"))?;
+
+    info!(
+        "Generated local HTTPS certificate for: {}",
+        subject_alt_names.join(", ")
+    );
+
+    Ok(TlsPaths {
+        cert_path,
+        key_path,
+    })
+}
+
+fn local_https_subject_alt_names(bind_host: Ipv4Addr) -> Vec<String> {
+    let mut names = vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ];
+
+    if !bind_host.is_unspecified() {
+        names.push(bind_host.to_string());
+    }
+
+    match local_ip_address::list_afinet_netifas() {
+        Ok(interfaces) => {
+            for (_, ip) in interfaces {
+                if should_include_local_https_ip(ip) {
+                    names.push(ip.to_string());
+                }
+            }
+        }
+        Err(err) => {
+            warn!("Failed to enumerate local network interfaces for HTTPS cert: {err}");
+            if let Ok(ip) = local_ip_address::local_ip()
+                && should_include_local_https_ip(ip)
+            {
+                names.push(ip.to_string());
+            }
+        }
+    }
+
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn should_include_local_https_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(addr) => !addr.is_unspecified() && !addr.is_broadcast(),
+        IpAddr::V6(addr) => !addr.is_unspecified(),
+    }
 }
 
 fn run_local_manga_archive_shim(
@@ -1917,12 +2008,12 @@ async fn run_server(
         ))
         .layer(middleware::from_fn(serialize_manga_chapters_requests))
         .layer(middleware::from_fn(rewrite_manga_pages_response));
+    let tls_paths = cli.tls_paths(data_dir)?;
+    let server_scheme = if tls_paths.is_some() { "https" } else { "http" };
 
     info!(
         "🌍 Starting Web Interface at {}://{}:{}",
-        cli.server_scheme(),
-        host,
-        port
+        server_scheme, host, port
     );
 
     let ocr_router = manatan_ocr_server::create_router(data_dir.clone());
@@ -1974,11 +2065,14 @@ async fn run_server(
     });
 
     let server_future = async move {
-        if let Some((cert_path, key_path)) = cli.tls_paths()? {
+        if let Some(tls_paths) = tls_paths {
             let tls_config =
-                axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_path, key_path)
-                    .await
-                    .map_err(|err| anyhow!("Failed to load TLS certificate/key: {err}"))?;
+                axum_server::tls_rustls::RustlsConfig::from_pem_file(
+                    tls_paths.cert_path,
+                    tls_paths.key_path,
+                )
+                .await
+                .map_err(|err| anyhow!("Failed to load TLS certificate/key: {err}"))?;
 
             axum_server::bind_rustls(listener_addr, tls_config)
                 .handle(server_handle)

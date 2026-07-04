@@ -90,14 +90,89 @@ export abstract class BaseClient<Client, ClientConfig, Fetcher> {
         protected handleRefreshToken: (refreshToken: string) => AbortableApolloMutationResponse<UserRefreshMutation>,
     ) {}
 
+    public static getDefaultBaseUrl(): string {
+        if (import.meta.env.DEV) {
+            return import.meta.env.VITE_SERVER_URL_DEFAULT;
+        }
+
+        return window.location.origin;
+    }
+
+    private static getEffectivePort(url: URL): string {
+        if (url.port) {
+            return url.port;
+        }
+
+        if (url.protocol === 'http:') {
+            return '80';
+        }
+
+        if (url.protocol === 'https:') {
+            return '443';
+        }
+
+        return '';
+    }
+
+    private static isLoopbackHost(hostname: string): boolean {
+        const normalizedHostname = hostname.toLowerCase().replace(/^\[(.*)]$/, '$1');
+
+        return (
+            normalizedHostname === 'localhost' ||
+            normalizedHostname === '127.0.0.1' ||
+            normalizedHostname === '::1' ||
+            normalizedHostname === '0:0:0:0:0:0:0:1'
+        );
+    }
+
+    private static shouldUseCurrentOriginForStoredBaseUrl(storedUrl: URL, currentUrl: URL): boolean {
+        if (import.meta.env.DEV) {
+            return false;
+        }
+
+        if (BaseClient.getEffectivePort(storedUrl) !== BaseClient.getEffectivePort(currentUrl)) {
+            return false;
+        }
+
+        const sameHostname = storedUrl.hostname.toLowerCase() === currentUrl.hostname.toLowerCase();
+        const equivalentLoopbackHost =
+            BaseClient.isLoopbackHost(storedUrl.hostname) && BaseClient.isLoopbackHost(currentUrl.hostname);
+
+        if (!sameHostname && !equivalentLoopbackHost) {
+            return false;
+        }
+
+        return storedUrl.protocol !== currentUrl.protocol || storedUrl.host !== currentUrl.host;
+    }
+
+    private static getMigratedStoredBaseUrl(serverBaseURL: string, defaultUrl: string): string {
+        if (import.meta.env.DEV) {
+            return serverBaseURL;
+        }
+
+        try {
+            const storedUrl = new URL(serverBaseURL);
+            const currentUrl = new URL(window.location.origin);
+
+            if (!BaseClient.shouldUseCurrentOriginForStoredBaseUrl(storedUrl, currentUrl)) {
+                return serverBaseURL;
+            }
+
+            const storedPath = storedUrl.pathname === '/' ? '' : storedUrl.pathname;
+            return `${currentUrl.origin}${storedPath}${storedUrl.search}${storedUrl.hash}`;
+        } catch {
+            return defaultUrl;
+        }
+    }
+
     public getBaseUrl(): string {
-        const { hostname, port, protocol } = window.location;
+        const defaultUrl = BaseClient.getDefaultBaseUrl();
+        const storedBaseURL = AppStorage.local.getItemParsed(BaseClient.BASE_URL_KEY, defaultUrl);
+        const serverBaseURL = BaseClient.getMigratedStoredBaseUrl(storedBaseURL, defaultUrl);
 
-        const defaultUrl = import.meta.env.DEV
-            ? import.meta.env.VITE_SERVER_URL_DEFAULT
-            : `${protocol}//${hostname}:${port}`;
-
-        const serverBaseURL = AppStorage.local.getItemParsed(BaseClient.BASE_URL_KEY, defaultUrl);
+        if (serverBaseURL !== storedBaseURL) {
+            AppStorage.local.setItem(BaseClient.BASE_URL_KEY, serverBaseURL, false);
+        }
 
         // Apply subpath configuration to the base URL
         return SubpathUtil.getApiBaseUrl(serverBaseURL);

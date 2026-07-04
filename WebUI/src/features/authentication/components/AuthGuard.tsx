@@ -10,12 +10,13 @@ import { ReactNode, useEffect, useMemo, useRef } from 'react';
 import { SplashScreen } from '@/features/authentication/components/SplashScreen.tsx';
 import { requestManager } from '@/lib/requests/RequestManager.ts';
 import { AuthManager } from '@/features/authentication/AuthManager.ts';
+import { BaseClient } from '@/lib/requests/client/BaseClient.ts';
 
 export const AuthGuard = ({ children }: { children: ReactNode }) => {
     const { isAuthRequired } = AuthManager.useSession();
     const [baseUrl, setBaseUrl] = requestManager.useBaseUrl();
     const fallbackAttemptedRef = useRef(false);
-    const fallbackBaseUrl = useMemo(() => import.meta.env.VITE_SERVER_URL_DEFAULT, []);
+    const fallbackBaseUrl = useMemo(() => BaseClient.getDefaultBaseUrl(), []);
 
     useEffect(() => {
         console.info('[auth] AuthGuard state', { isAuthRequired });

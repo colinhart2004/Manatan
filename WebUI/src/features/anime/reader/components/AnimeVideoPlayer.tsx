@@ -67,7 +67,7 @@ import { useOCR } from '@/Manatan/context/OCRContext.tsx';
 import ManatanLogo from '@/Manatan/assets/manatan_logo.png';
 import { cleanPunctuation, lookupYomitan } from '@/Manatan/utils/api.ts';
 import { buildSentenceFuriganaFromLookup } from '@/Manatan/utils/japaneseFurigana';
-import { buildAnkiDefinitionHtml, buildScopedCustomCss } from '@/Manatan/utils/customCss';
+import { buildAnkiGlossaryHtml, buildScopedCustomCss } from '@/Manatan/utils/customCss';
 import {
     getWordAudioFilename,
     getWordAudioSourceLabel,
@@ -544,6 +544,7 @@ const buildDefinitionHtml = (
             .map(([key, value]) => `${key.replace(/([A-Z])/g, '-$1').toLowerCase()}:${value}`)
             .join(';');
     };
+    const styleAttr = (value: string): string => value ? ` style="${escapeHtmlAttr(value)}"` : '';
 
     const generateHTML = (node: any): string => {
         if (node === null || node === undefined) {
@@ -586,34 +587,34 @@ const buildDefinitionHtml = (
         const htmlAttrs = `${dataAttrString}${classAttrString}`;
 
         if (tag === 'ul') {
-            return `<ul style="padding-left: 20px; margin: 2px 0; list-style-type: disc;${customStyle}"${htmlAttrs}>${generateHTML(content)}</ul>`;
+            return `<ul${styleAttr(`padding-left: 20px; margin: 2px 0; list-style-type: disc;${customStyle}`)}${htmlAttrs}>${generateHTML(content)}</ul>`;
         }
         if (tag === 'ol') {
-            return `<ol style="padding-left: 20px; margin: 2px 0; list-style-type: decimal;${customStyle}"${htmlAttrs}>${generateHTML(content)}</ol>`;
+            return `<ol${styleAttr(`padding-left: 20px; margin: 2px 0; list-style-type: decimal;${customStyle}`)}${htmlAttrs}>${generateHTML(content)}</ol>`;
         }
         if (tag === 'li') {
-            return `<li style="${customStyle}"${htmlAttrs}>${generateHTML(content)}</li>`;
+            return `<li${styleAttr(customStyle)}${htmlAttrs}>${generateHTML(content)}</li>`;
         }
         if (tag === 'table') {
-            return `<table style="border-collapse: collapse; width: 100%; border: 1px solid #777;${customStyle}"${htmlAttrs}><tbody>${generateHTML(content)}</tbody></table>`;
+            return `<table${styleAttr(`border-collapse: collapse; width: 100%; border: 1px solid #777;${customStyle}`)}${htmlAttrs}><tbody>${generateHTML(content)}</tbody></table>`;
         }
         if (tag === 'tr') {
-            return `<tr style="${customStyle}"${htmlAttrs}>${generateHTML(content)}</tr>`;
+            return `<tr${styleAttr(customStyle)}${htmlAttrs}>${generateHTML(content)}</tr>`;
         }
         if (tag === 'th') {
-            return `<th style="border: 1px solid #777; padding: 2px 8px; text-align: center; font-weight: bold;${customStyle}"${htmlAttrs}>${generateHTML(content)}</th>`;
+            return `<th${styleAttr(`border: 1px solid #777; padding: 2px 8px; text-align: center; font-weight: bold;${customStyle}`)}${htmlAttrs}>${generateHTML(content)}</th>`;
         }
         if (tag === 'td') {
-            return `<td style="border: 1px solid #777; padding: 2px 8px; text-align: center;${customStyle}"${htmlAttrs}>${generateHTML(content)}</td>`;
+            return `<td${styleAttr(`border: 1px solid #777; padding: 2px 8px; text-align: center;${customStyle}`)}${htmlAttrs}>${generateHTML(content)}</td>`;
         }
         if (tag === 'span') {
-            return `<span style="${tagClassStyle}${customStyle}"${htmlAttrs}>${generateHTML(content)}</span>`;
+            return `<span${styleAttr(`${tagClassStyle}${customStyle}`)}${htmlAttrs}>${generateHTML(content)}</span>`;
         }
         if (tag === 'div') {
-            return `<div style="${customStyle}"${htmlAttrs}>${generateHTML(content)}</div>`;
+            return `<div${styleAttr(customStyle)}${htmlAttrs}>${generateHTML(content)}</div>`;
         }
         if (tag === 'a') {
-            return `<a href="${escapeHtmlAttr(href || '')}" target="_blank" style="text-decoration: underline;${customStyle}"${htmlAttrs}>${generateHTML(content)}</a>`;
+            return `<a href="${escapeHtmlAttr(href || '')}" target="_blank"${styleAttr(`text-decoration: underline;${customStyle}`)}${htmlAttrs}>${generateHTML(content)}</a>`;
         }
 
         return generateHTML(content);
@@ -625,44 +626,29 @@ const buildDefinitionHtml = (
     if (!glossaryEntries.length) {
         return '';
     }
-    const dictionaryNames = Array.from(new Set(glossaryEntries.map((def) => def.dictionaryName)));
-    const contentHtml = glossaryEntries
-        .map((def, idx) => {
-            const tagsHTML = normalizeTagList(def.tags ?? []).map(
-                (tag) =>
-                    `<span class="tag" style="display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 0.75em; font-weight: bold; margin-right: 6px; color: #fff; background-color: #666; vertical-align: middle;"><span class="tag-label">${tag}</span></span>`,
-            );
-            const dictHTML = `<span class="tag tag-label" style="display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 0.75em; font-weight: bold; margin-right: 6px; color: #fff; background-color: #666; vertical-align: middle;">${def.dictionaryName}</span>`;
-            const headerHTML = [...tagsHTML, dictHTML].join(' ');
+    const definitions = glossaryEntries
+        .map((def) => {
             const contentHTML = def.content
                 .map((content) => {
                     try {
                         const parsed = JSON.parse(content);
-                        return `<div style="margin-bottom: 2px;">${generateHTML(parsed)}</div>`;
+                        return generateHTML(parsed);
                     } catch {
-                        return `<div style="margin-bottom: 2px;">${content}</div>`;
+                        return content;
                     }
                 })
                 .join('');
-            return `
-                <div class="gloss-item definition-item" data-dictionary="${escapeHtmlAttr(def.dictionaryName)}" style="margin-bottom: 12px; display: flex;">
-                    <div style="flex-shrink: 0; width: 24px; font-weight: bold;"><span class="gloss-separator">${idx + 1}.</span></div>
-                    <div style="flex-grow: 1;" class="definition-item-inner definition-item-content">
-                        <div style="margin-bottom: 4px;" class="definition-tag-list tag-list">${headerHTML}</div>
-                        <div style="white-space: pre-wrap;" class="gloss-content">${contentHTML}</div>
-                    </div>
-                </div>
-            `;
+            return {
+                dictionaryName: def.dictionaryName,
+                tags: normalizeTagList(def.tags ?? []),
+                contentHtml: contentHTML,
+            };
         })
-        .join('');
+        .filter((definition) => definition.contentHtml);
 
-    return buildAnkiDefinitionHtml(contentHtml, {
+    return buildAnkiGlossaryHtml(definitions, {
         customCss: options.customCss,
-        dictionaryNames,
         dictionaryStyles: entry.styles,
-        themeClassName: options.themeClassName,
-        wrapperClassName: options.wrapperClassName ?? 'anime-dictionary-popup yomitan-popup',
-        wrapperSelector: options.wrapperSelector ?? '.anki-dictionary-view.anime-dictionary-popup',
     });
 };
 

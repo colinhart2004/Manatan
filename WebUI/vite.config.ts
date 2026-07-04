@@ -50,9 +50,10 @@ export default defineConfig(({ command }) => ({
         nodePolyfills({
             include: ['assert'],
         }),
-        // Only setup image runtime caching
+        // Register a baseline service worker and keep media-heavy routes cache-friendly.
         VitePWA({
             registerType: 'autoUpdate',
+            injectRegister: 'script',
             manifest: false, // Use existing manifest
             devOptions: {
                 enabled: true,
@@ -60,6 +61,21 @@ export default defineConfig(({ command }) => ({
             workbox: {
                 globPatterns: [],
                 runtimeCaching: [
+                    {
+                        urlPattern: ({ request }) => request.mode === 'navigate',
+                        handler: 'NetworkFirst',
+                        options: {
+                            cacheName: 'app-shell',
+                            networkTimeoutSeconds: 5,
+                            expiration: {
+                                maxEntries: 10,
+                                purgeOnQuotaError: true,
+                            },
+                            cacheableResponse: {
+                                statuses: [0, 200],
+                            },
+                        },
+                    },
                     {
                         urlPattern: ({ request, url }) => {
                             const { pathname } = url;

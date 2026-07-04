@@ -41,6 +41,7 @@ wildcard_imports = "warn"
 anyhow = "1.0"
 avif-decode = "1.0"
 axum = { version = "0.8.7", features = ["macros", "multipart", "ws"] }
+axum-server = { version = "0.8.0", features = ["tls-rustls-no-provider"] }
 base64 = "0.22"
 bytes = "1.11"
 chrome_lens_ocr = "0.3.0"

@@ -23,6 +23,7 @@ embed-jre = []
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+axum-server.workspace = true
 clap.workspace = true
 directories.workspace = true
 eframe.workspace = true

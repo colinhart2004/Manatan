@@ -6,7 +6,10 @@
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
+  "display_override": ["standalone", "minimal-ui", "browser"],
   "orientation": "portrait-primary",
+  "prefer_related_applications": false,
+  "categories": ["entertainment", "education", "books"],
   "theme_color": "#3181C0",
   "background_color": "#3181C0",
   "icons": [

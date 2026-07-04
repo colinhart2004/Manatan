@@ -6,7 +6,7 @@ use std::{
     env,
     fs::{self},
     io::Read,
-    net::{Ipv4Addr, TcpListener},
+    net::{Ipv4Addr, SocketAddr, TcpListener},
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
@@ -183,6 +183,14 @@ struct Cli {
     #[arg(long, default_value_t = 4568, env = "MANATAN_PORT")]
     port: u16,
 
+    /// TLS certificate PEM path for serving the web interface over HTTPS
+    #[arg(long, env = "MANATAN_TLS_CERT_PATH")]
+    tls_cert_path: Option<PathBuf>,
+
+    /// TLS private key PEM path for serving the web interface over HTTPS
+    #[arg(long, env = "MANATAN_TLS_KEY_PATH")]
+    tls_key_path: Option<PathBuf>,
+
     /// Path to the Manatan SQLite database
     #[arg(long, env = "MANATAN_DB_PATH")]
     db_path: Option<PathBuf>,
@@ -259,6 +267,26 @@ struct Cli {
     /// Local novel directory (absolute or relative to data dir)
     #[arg(long, env = "MANATAN_LOCAL_LN_PATH")]
     local_novel_path: Option<PathBuf>,
+}
+
+impl Cli {
+    fn server_scheme(&self) -> &'static str {
+        if self.tls_cert_path.is_some() || self.tls_key_path.is_some() {
+            "https"
+        } else {
+            "http"
+        }
+    }
+
+    fn tls_paths(&self) -> anyhow::Result<Option<(&Path, &Path)>> {
+        match (self.tls_cert_path.as_deref(), self.tls_key_path.as_deref()) {
+            (Some(cert_path), Some(key_path)) => Ok(Some((cert_path, key_path))),
+            (None, None) => Ok(None),
+            _ => Err(anyhow!(
+                "Both --tls-cert-path and --tls-key-path are required to enable HTTPS"
+            )),
+        }
+    }
 }
 
 fn parse_boolish(value: &str) -> Result<bool, String> {
@@ -1298,6 +1326,7 @@ fn main() -> eframe::Result<()> {
 
     let host = args.host;
     let port = args.port;
+    let scheme = args.server_scheme();
 
     if args.headless {
         info!("👻 Starting in Headless Mode (No GUI)...");
@@ -1306,7 +1335,7 @@ fn main() -> eframe::Result<()> {
 
         rt.block_on(async {
             if args.open_page {
-                tokio::spawn(async move { open_webpage_when_ready(host, port).await });
+                tokio::spawn(async move { open_webpage_when_ready(host, port, scheme).await });
             }
 
             let (shutdown_tx, shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
@@ -1330,6 +1359,7 @@ fn main() -> eframe::Result<()> {
 
     let thread_host = host;
     let thread_args = args.clone();
+    let thread_scheme = thread_args.server_scheme();
     thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
         rt.block_on(async {
@@ -1338,7 +1368,7 @@ fn main() -> eframe::Result<()> {
             };
 
             let h = thread_host;
-            tokio::spawn(async move { open_webpage_when_ready(h, port).await });
+            tokio::spawn(async move { open_webpage_when_ready(h, port, thread_scheme).await });
 
             if let Err(err) = run_server(
                 shutdown_rx,
@@ -1888,7 +1918,12 @@ async fn run_server(
         .layer(middleware::from_fn(serialize_manga_chapters_requests))
         .layer(middleware::from_fn(rewrite_manga_pages_response));
 
-    info!("🌍 Starting Web Interface at http://{}:{}", host, port);
+    info!(
+        "🌍 Starting Web Interface at {}://{}:{}",
+        cli.server_scheme(),
+        host,
+        port
+    );
 
     let ocr_router = manatan_ocr_server::create_router(data_dir.clone());
     let yomitan_router = manatan_yomitan_server::create_router(data_dir.clone());
@@ -1929,21 +1964,46 @@ async fn run_server(
         .fallback(serve_react_app)
         .layer(cors);
 
-    let listener_addr = format!("{host}:{port}");
-    let listener = tokio::net::TcpListener::bind(&listener_addr)
-        .await
-        .map_err(|err| anyhow!("Failed to create main server socket: {err:?}"))?;
-
-    let server_future = axum::serve(listener, app).with_graceful_shutdown(async move {
+    let listener_addr = SocketAddr::from((host, port));
+    let server_handle = axum_server::Handle::new();
+    let shutdown_handle = server_handle.clone();
+    tokio::spawn(async move {
         let _ = shutdown_signal.recv().await;
         info!("🛑 Shutdown signal received.");
+        shutdown_handle.graceful_shutdown(Some(Duration::from_secs(10)));
     });
+
+    let server_future = async move {
+        if let Some((cert_path, key_path)) = cli.tls_paths()? {
+            let tls_config =
+                axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_path, key_path)
+                    .await
+                    .map_err(|err| anyhow!("Failed to load TLS certificate/key: {err}"))?;
+
+            axum_server::bind_rustls(listener_addr, tls_config)
+                .handle(server_handle)
+                .serve(app.into_make_service())
+                .await
+                .map_err(|err| anyhow!("HTTPS server failed: {err}"))
+        } else {
+            axum_server::bind(listener_addr)
+                .handle(server_handle)
+                .serve(app.into_make_service())
+                .await
+                .map_err(|err| anyhow!("HTTP server failed: {err}"))
+        }
+    };
 
     info!("✅ Unified Server Running.");
 
     tokio::select! {
         _ = suwayomi_proc.wait() => { error!("❌ Suwayomi exited unexpectedly"); }
-        _ = server_future => { info!("✅ Web server shutdown complete."); }
+        server_result = server_future => {
+            match server_result {
+                Ok(()) => info!("✅ Web server shutdown complete."),
+                Err(err) => error!("❌ Web server failed: {err}"),
+            }
+        }
     }
 
     info!("🛑 terminating child processes...");
@@ -3029,16 +3089,26 @@ fn build_updater_with_download(
         .build()
 }
 
-async fn open_webpage_when_ready(host: Ipv4Addr, port: u16) {
-    let client = Client::new();
+async fn open_webpage_when_ready(host: Ipv4Addr, port: u16, scheme: &'static str) {
+    let client = if scheme == "https" {
+        Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap_or_else(|err| {
+                warn!("Failed to build HTTPS readiness client: {err}");
+                Client::new()
+            })
+    } else {
+        Client::new()
+    };
 
     let host_target = if host == Ipv4Addr::new(0, 0, 0, 0) {
         "localhost".to_string()
     } else {
         host.to_string()
     };
-    let url = format!("http://{host_target}:{port}");
-    let health_url = format!("http://{host_target}:{port}/health");
+    let url = format!("{scheme}://{host_target}:{port}");
+    let health_url = format!("{scheme}://{host_target}:{port}/health");
 
     info!("⏳ Polling health endpoint for readiness (timeout 10s)...");
 

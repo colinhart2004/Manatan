@@ -118,6 +118,10 @@ import {
     DEFAULT_ANIME_HOTKEYS,
 } from '@/Manatan/hotkeys/AnimeHotkeys.ts';
 import { getPopupTheme } from '@/features/ln/reader/utils/themes';
+import {
+    shouldTryBrowserAudioCapture,
+    shouldTryServerAudioCapture,
+} from '@/features/anime/reader/utils/audioCaptureStrategy';
 
 type SubtitleTrack = {
     url: string;
@@ -143,12 +147,20 @@ type SubtitleCue = {
     text: string;
 };
 
+type AudioCaptureSource = {
+    stream: MediaStream;
+    mute: () => () => void;
+    stop?: () => void;
+};
+
 type SwipeState = {
     startX: number;
     startY: number;
     startTime: number;
     moved: boolean;
 };
+
+const SERVER_AUDIO_CAPTURE_TIMEOUT_MS = 5000;
 
 type WebKitFullscreenVideoElement = HTMLVideoElement & {
     webkitDisplayingFullscreen?: boolean;
@@ -2587,7 +2599,11 @@ export const AnimeVideoPlayer = ({
             }
             return null;
         }
-        return { stream: new MediaStream(audioTracks), mute: () => () => {} };
+        return {
+            stream: new MediaStream(audioTracks),
+            mute: () => () => {},
+            stop: () => audioTracks.forEach((track) => track.stop()),
+        };
     }, [ensureAudioNodes]);
 
     const captureSentenceAudio = useCallback(async (start: number, end: number) => {
@@ -2610,8 +2626,8 @@ export const AnimeVideoPlayer = ({
         audioCaptureLockRef.current = true;
         const previousTime = video.currentTime;
         const previousPaused = video.paused;
-        let audioSource: { stream: MediaStream; mute: () => () => void } | null = null;
-        let activeAudioSource: { stream: MediaStream; mute: () => () => void } | null = null;
+        let audioSource: AudioCaptureSource | null = null;
+        let activeAudioSource: AudioCaptureSource | null = null;
         let restoreMute: (() => void) | null = null;
         let scriptProcessor: ScriptProcessorNode | null = null;
         let processorGain: GainNode | null = null;
@@ -2627,10 +2643,14 @@ export const AnimeVideoPlayer = ({
                 start: String(start),
                 end: String(end),
             });
+            const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+            const timeoutId = controller
+                ? window.setTimeout(() => controller.abort(), SERVER_AUDIO_CAPTURE_TIMEOUT_MS)
+                : null;
             try {
                 const response = await fetch(
                     `/api/audio/clip?${params.toString()}`,
-                    { method: 'POST', credentials: 'include' },
+                    { method: 'POST', credentials: 'include', signal: controller?.signal },
                 );
                 if (!response.ok) {
                     console.warn('[AnimeVideoPlayer] Server audio capture failed', response.status);
@@ -2642,20 +2662,36 @@ export const AnimeVideoPlayer = ({
                 }
                 return await blobToBase64(blob);
             } catch (error) {
+                if (error instanceof DOMException && error.name === 'AbortError') {
+                    console.warn('[AnimeVideoPlayer] Server audio capture timed out');
+                    return null;
+                }
                 console.error('[AnimeVideoPlayer] Server audio capture failed', error);
                 return null;
+            } finally {
+                if (timeoutId != null) {
+                    window.clearTimeout(timeoutId);
+                }
             }
         };
 
         try {
             const isNativeApp = /MangatanNative|ManatanNative/i.test(navigator.userAgent);
-            const shouldForceServerAudio = isDesktopPlatform || isAndroid || isNativeApp;
-            if (shouldForceServerAudio || isHlsSource) {
+            const audioCaptureStrategy = {
+                isAndroid,
+                isDesktopPlatform,
+                isHlsSource,
+                isNativeApp,
+            };
+            if (shouldTryServerAudioCapture(audioCaptureStrategy)) {
                 const serverAudio = await fetchServerAudioClip();
                 if (serverAudio) {
                     return serverAudio;
                 }
-                if (shouldForceServerAudio) {
+                if (!shouldTryBrowserAudioCapture({
+                    ...audioCaptureStrategy,
+                    hasServerAudio: false,
+                })) {
                     return null;
                 }
             }
@@ -2871,9 +2907,7 @@ export const AnimeVideoPlayer = ({
             return null;
         } finally {
             try {
-                if (activeAudioSource?.stream) {
-                    activeAudioSource.stream.getTracks().forEach((track) => track.stop());
-                }
+                activeAudioSource?.stop?.();
             } catch {
                 // ignore
             }
@@ -2893,7 +2927,17 @@ export const AnimeVideoPlayer = ({
             }
             audioCaptureLockRef.current = false;
         }
-    }, [animeId, blobToBase64, currentEpisodeIndex, getAudioCaptureSource, isHlsSource, seekVideoTo, selectedVideoIndex]);
+    }, [
+        animeId,
+        blobToBase64,
+        currentEpisodeIndex,
+        getAudioCaptureSource,
+        isAndroid,
+        isDesktopPlatform,
+        isHlsSource,
+        seekVideoTo,
+        selectedVideoIndex,
+    ]);
 
 
     const addNoteToAnki = useCallback(

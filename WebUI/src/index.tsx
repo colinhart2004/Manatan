@@ -15,6 +15,7 @@ import '@/lib/PointerDeviceUtil.ts';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from '@/App';
+import { cleanupDevServiceWorkers } from '@/lib/service-worker/DevServiceWorkerCleanup.ts';
 
 // --- FORCE NATIVE APP VIEWPORT ---
 const enforceViewport = () => {
@@ -29,13 +30,18 @@ const enforceViewport = () => {
         document.head.appendChild(meta);
     }
     // "user-scalable=no" gives us full control over the touch events
-    meta.setAttribute('content', 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover');
-    
+    meta.setAttribute(
+        'content',
+        'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover',
+    );
+
     // Prevent iOS Safari bounce/rubber-banding on the document itself
     document.body.style.overscrollBehavior = 'none';
 };
 enforceViewport();
 // ---------------------------------
+
+cleanupDevServiceWorkers(import.meta.env.DEV);
 
 const container = document.getElementById('root');
 const root = createRoot(container!);

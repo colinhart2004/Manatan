@@ -56,7 +56,7 @@ export default defineConfig(({ command }) => ({
             injectRegister: 'script',
             manifest: false, // Use existing manifest
             devOptions: {
-                enabled: true,
+                enabled: false,
             },
             workbox: {
                 globPatterns: [],

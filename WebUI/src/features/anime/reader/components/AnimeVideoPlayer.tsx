@@ -46,11 +46,13 @@ import VisibilityIcon from '@mui/icons-material/Visibility';
 import VisibilityOffIcon from '@mui/icons-material/VisibilityOff';
 import UploadFileIcon from '@mui/icons-material/UploadFile';
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline';
+import AddIcon from '@mui/icons-material/Add';
 import NoteAddIcon from '@mui/icons-material/NoteAdd';
 import MenuBookIcon from '@mui/icons-material/MenuBook';
 import HourglassEmptyIcon from '@mui/icons-material/HourglassEmpty';
 import VolumeUpIcon from '@mui/icons-material/VolumeUp';
 import TextFieldsIcon from '@mui/icons-material/TextFields';
+import SystemUpdateAltIcon from '@mui/icons-material/SystemUpdateAlt';
 import { useTheme } from '@mui/material/styles';
 import useMediaQuery from '@mui/material/useMediaQuery';
 import { useCallback, useEffect, useMemo, useRef, useState, Fragment } from 'react';
@@ -93,12 +95,21 @@ import { makeToast } from '@/base/utils/Toast.ts';
 import { MediaQuery } from '@/base/utils/MediaQuery.tsx';
 import {
     addNote,
+    calculateUpdatedFields,
     findNotes,
     guiBrowse,
     mapSentenceFieldValue,
+    notesInfo,
     sentenceFieldNeedsFurigana,
+    updateNote,
     updateLastCard,
 } from '@/Manatan/utils/anki.ts';
+import {
+    getAnkiAddNoteOptions,
+    getAnkiDuplicateAction,
+    getAnkiDuplicateButtonMode,
+    type AnkiDuplicateAction,
+} from '@/Manatan/utils/ankiDuplicateAction';
 import {
     AnimeHotkey,
     ANIME_HOTKEYS,
@@ -137,6 +148,12 @@ type SwipeState = {
     startY: number;
     startTime: number;
     moved: boolean;
+};
+
+type WebKitFullscreenVideoElement = HTMLVideoElement & {
+    webkitDisplayingFullscreen?: boolean;
+    webkitEnterFullscreen?: () => void;
+    webkitExitFullscreen?: () => void;
 };
 
 type Props = {
@@ -691,7 +708,26 @@ export const AnimeVideoPlayer = ({
         return { isAndroid: android, isDesktopPlatform: !android && !ios };
     }, []);
     const isLandscape = useMediaQuery('(orientation: landscape)');
-    const shouldShowFullscreen = showFullscreenButton ?? isDesktop;
+    const fullscreenSupport = useMemo(() => {
+        if (typeof document === 'undefined' || typeof window === 'undefined') {
+            return {
+                cssFallback: false,
+                element: false,
+                webKitVideo: false,
+            };
+        }
+
+        const video = document.createElement('video') as WebKitFullscreenVideoElement;
+
+        return {
+            cssFallback: true,
+            element: typeof document.documentElement.requestFullscreen === 'function',
+            webKitVideo: typeof video.webkitEnterFullscreen === 'function',
+        };
+    }, []);
+    const shouldShowFullscreen =
+        showFullscreenButton ??
+        (isDesktop || fullscreenSupport.element || fullscreenSupport.webKitVideo || fullscreenSupport.cssFallback);
     const shouldShowVolume = isDesktopPlatform;
     const infoButtonLabel = isDesktopPlatform ? 'Show keyboard shortcuts' : 'Show tap zone';
     const { wasPopupClosedRecently, settings, openSettings, showAlert } = useOCR();
@@ -852,12 +888,15 @@ export const AnimeVideoPlayer = ({
         enableBraveAudioFix &&
         (braveAudioFixMode === 'on' || (braveAudioFixMode === 'auto' && autoBraveFixDetected));
     const [isPageFullscreen, setIsPageFullscreen] = useState(false);
+    const [isNativeVideoFullscreen, setIsNativeVideoFullscreen] = useState(false);
     const wrapperRef = useRef<HTMLDivElement | null>(null);
     const isAnyMenuOpen = Boolean(
         videoMenuAnchor || subtitleMenuAnchor || speedMenuAnchor || episodeMenuAnchor || wordAudioMenuAnchor,
     );
+    const isFullscreenActive = isPageFullscreen || isNativeVideoFullscreen;
+    const fullscreenButtonLabel = isFullscreenActive ? 'Exit fullscreen' : 'Enter fullscreen';
     const isFullscreenOverlay = isPageFullscreen || (fillHeight && isMobile);
-    const menuContainer = isFullscreenOverlay ? wrapperRef.current ?? undefined : undefined;
+    const menuContainer = isFullscreenOverlay ? (wrapperRef.current ?? undefined) : undefined;
     const wordAudioOptions = useMemo(
         () => getWordAudioSourceOptions(settings.yomitanLanguage),
         [settings.yomitanLanguage],
@@ -1030,7 +1069,7 @@ export const AnimeVideoPlayer = ({
         };
     }, [isPageFullscreen]);
 
-    const isNativeFullscreenActive = useCallback(() => {
+    const isBrowserFullscreenActive = useCallback(() => {
         if (typeof document === 'undefined') {
             return false;
         }
@@ -1048,7 +1087,14 @@ export const AnimeVideoPlayer = ({
             return;
         }
 
-        if (isNativeFullscreenActive()) {
+        if (isNativeVideoFullscreen) {
+            const video = videoRef.current as WebKitFullscreenVideoElement | null;
+            video?.webkitExitFullscreen?.();
+            setIsNativeVideoFullscreen(false);
+            return;
+        }
+
+        if (isBrowserFullscreenActive()) {
             try {
                 await document.exitFullscreen();
             } catch (err) {
@@ -1057,35 +1103,71 @@ export const AnimeVideoPlayer = ({
             return;
         }
 
-        const fullscreenTarget = document.documentElement;
-        if (fullscreenTarget?.requestFullscreen) {
-            try {
-                await fullscreenTarget.requestFullscreen();
-                setIsPageFullscreen(true);
-            } catch (err) {
-                setIsPageFullscreen(true);
-            }
+        if (isPageFullscreen) {
+            setIsPageFullscreen(false);
             return;
         }
 
-        setIsPageFullscreen((prev) => !prev);
-    }, [isNativeFullscreenActive]);
+        const fullscreenTarget = wrapperRef.current;
+        if (fullscreenTarget?.requestFullscreen) {
+            try {
+                await fullscreenTarget.requestFullscreen({ navigationUI: 'hide' });
+                setIsPageFullscreen(true);
+                return;
+            } catch (err) {
+                // Continue to the CSS fallback below so mobile controls and subtitles remain visible.
+            }
+        }
+
+        const video = videoRef.current as WebKitFullscreenVideoElement | null;
+        if (fullscreenSupport.webKitVideo && video?.webkitEnterFullscreen) {
+            try {
+                video.webkitEnterFullscreen();
+                setIsNativeVideoFullscreen(true);
+                return;
+            } catch (err) {
+                // Fall back to CSS mode if native video fullscreen is rejected.
+            }
+        }
+
+        setIsPageFullscreen(true);
+    }, [fullscreenSupport.webKitVideo, isBrowserFullscreenActive, isNativeVideoFullscreen, isPageFullscreen]);
 
     useEffect(() => {
         if (typeof document === 'undefined') {
             return;
         }
         const handleChange = () => {
-            if (!wrapperRef.current) {
-                return;
-            }
-            setIsPageFullscreen(isNativeFullscreenActive());
+            setIsPageFullscreen(isBrowserFullscreenActive());
         };
         document.addEventListener('fullscreenchange', handleChange);
         return () => {
             document.removeEventListener('fullscreenchange', handleChange);
         };
-    }, [isNativeFullscreenActive]);
+    }, [isBrowserFullscreenActive]);
+
+    useEffect(() => {
+        const video = videoRef.current as WebKitFullscreenVideoElement | null;
+        if (!video) {
+            return;
+        }
+
+        const handleBeginFullscreen = () => {
+            setIsNativeVideoFullscreen(true);
+        };
+        const handleEndFullscreen = () => {
+            setIsNativeVideoFullscreen(false);
+        };
+
+        video.addEventListener('webkitbeginfullscreen', handleBeginFullscreen);
+        video.addEventListener('webkitendfullscreen', handleEndFullscreen);
+        setIsNativeVideoFullscreen(Boolean(video.webkitDisplayingFullscreen));
+
+        return () => {
+            video.removeEventListener('webkitbeginfullscreen', handleBeginFullscreen);
+            video.removeEventListener('webkitendfullscreen', handleEndFullscreen);
+        };
+    }, [videoSrc]);
 
     useEffect(() => {
         if (!isMobile || !fillHeight) {
@@ -2815,7 +2897,15 @@ export const AnimeVideoPlayer = ({
 
 
     const addNoteToAnki = useCallback(
-        async (entry: DictionaryResult, overrideImage?: string) => {
+        async (
+            entry: DictionaryResult,
+            options: {
+                overrideImage?: string;
+                isDuplicate?: boolean;
+                duplicateAction?: AnkiDuplicateAction;
+                updateExistingNoteId?: number | null;
+            } = {},
+        ) => {
             if (!settings.ankiDeck || !settings.ankiModel) {
                 showAlert('Anki Settings Missing', 'Please select a Deck and Model in settings.');
                 return null;
@@ -2827,6 +2917,9 @@ export const AnimeVideoPlayer = ({
             const map = settings.ankiFieldMap || {};
             const fields: Record<string, string> = {};
             const sentence = dictionaryContext?.sentence || '';
+            const duplicateAction = options.duplicateAction || getAnkiDuplicateAction({
+                ankiDuplicateAction: settings.ankiDuplicateAction,
+            });
             const definitionHtmlOptions = {
                 customCss: settings.animePopupCustomCss,
                 themeClassName: settings.animePopupTheme === 'light' ? 'yomitan-popup-light' : 'yomitan-popup-dark',
@@ -2909,7 +3002,7 @@ export const AnimeVideoPlayer = ({
 
             let pictureData: { data?: string; filename: string; fields: string[] } | undefined;
             if (imgField) {
-                const base64 = overrideImage || (await captureVideoFrame());
+                const base64 = options.overrideImage || (await captureVideoFrame());
                 if (base64) {
                     pictureData = {
                         data: base64.split(';base64,')[1],
@@ -2943,6 +3036,39 @@ export const AnimeVideoPlayer = ({
             }
 
             try {
+                if (options.isDuplicate && duplicateAction === 'overwrite') {
+                    if (!options.updateExistingNoteId) {
+                        throw new Error('Could not find the existing Anki note to overwrite.');
+                    }
+                    const noteInfo = await notesInfo(url, [options.updateExistingNoteId]);
+                    if (!noteInfo?.[0]) {
+                        throw new Error('Could not fetch existing note info.');
+                    }
+                    const mergedFields = calculateUpdatedFields(
+                        noteInfo[0].fields,
+                        fields,
+                        settings.ankiFieldUpdateModes || {},
+                    );
+                    const noteUpdate: {
+                        id: number;
+                        fields: Record<string, string>;
+                        picture?: { data?: string; filename: string; fields: string[] };
+                        audio?: Array<{ url?: string; data?: string; filename: string; fields: string[] }>;
+                    } = {
+                        id: options.updateExistingNoteId,
+                        fields: mergedFields,
+                    };
+                    if (pictureData) {
+                        noteUpdate.picture = pictureData;
+                    }
+                    if (audioPayloads.length) {
+                        noteUpdate.audio = audioPayloads;
+                    }
+                    await updateNote(url, noteUpdate);
+                    makeToast('Anki card updated.', { variant: 'success', autoHideDuration: 1500 });
+                    return options.updateExistingNoteId;
+                }
+
                 const noteId = await addNote(
                     url,
                     settings.ankiDeck,
@@ -2951,12 +3077,18 @@ export const AnimeVideoPlayer = ({
                     ['manatan'],
                     pictureData,
                     audioPayloads.length ? audioPayloads : undefined,
+                    getAnkiAddNoteOptions({
+                        isDuplicate: Boolean(options.isDuplicate),
+                        action: duplicateAction,
+                        duplicateScope: settings.ankiDuplicateScope,
+                    }),
                 );
                 makeToast('Anki card added.', { variant: 'success', autoHideDuration: 1500 });
                 return noteId;
             } catch (error: any) {
-                console.error('[AnimeVideoPlayer] Failed to add note', error);
-                makeToast('Failed to add Anki card', 'error', error?.message ?? String(error));
+                const actionLabel = options.isDuplicate && duplicateAction === 'overwrite' ? 'update' : 'add';
+                console.error(`[AnimeVideoPlayer] Failed to ${actionLabel} note`, error);
+                makeToast(`Failed to ${actionLabel} Anki card`, 'error', error?.message ?? String(error));
                 return null;
             }
         },
@@ -2967,8 +3099,13 @@ export const AnimeVideoPlayer = ({
             getDictionaryEntryKey,
             settings.ankiConnectUrl,
             settings.ankiDeck,
+            settings.ankiDuplicateAction,
+            settings.ankiDuplicateScope,
             settings.ankiFieldMap,
+            settings.ankiFieldUpdateModes,
             settings.ankiModel,
+            settings.animePopupCustomCss,
+            settings.animePopupTheme,
             settings.resultGroupingMode,
             settings.yomitanLanguage,
             showAlert,
@@ -3897,7 +4034,7 @@ export const AnimeVideoPlayer = ({
 
     const checkDuplicateForEntry = useCallback(
         async (entry: DictionaryResult) => {
-            if (!settings.ankiConnectEnabled || !settings.ankiCheckDuplicates || !settings.ankiDeck) {
+            if (!settings.ankiConnectEnabled || !settings.ankiCheckDuplicates) {
                 return;
             }
             const entryKey = getDictionaryEntryKey(entry);
@@ -3908,12 +4045,25 @@ export const AnimeVideoPlayer = ({
             try {
                 const url = settings.ankiConnectUrl || 'http://127.0.0.1:8765';
                 const safeHeadword = entry.headword.replace(/"/g, '\\"');
-                let query = `deck:"${settings.ankiDeck}"`;
-                if (ankiTargetField) {
-                    query += ` "${ankiTargetField}:${safeHeadword}"`;
-                } else {
-                    query += ` "${safeHeadword}"`;
+                const scope = settings.ankiDuplicateScope || 'deck';
+                const queryParts: string[] = [];
+                if (scope === 'deck' && settings.ankiDeck) {
+                    queryParts.push(`deck:"${settings.ankiDeck}"`);
+                } else if (scope === 'deck-root' && settings.ankiDeck) {
+                    const rootDeck = settings.ankiDeck.split('::')[0];
+                    queryParts.push(`deck:"${rootDeck}::*"`);
                 }
+
+                if (!settings.ankiCheckDuplicatesAllModels && settings.ankiModel) {
+                    queryParts.push(`note:"${settings.ankiModel}"`);
+                }
+
+                if (ankiTargetField) {
+                    queryParts.push(`"${ankiTargetField}:${safeHeadword}"`);
+                } else {
+                    queryParts.push(`"${safeHeadword}"`);
+                }
+                const query = queryParts.join(' ');
                 const ids = await findNotes(url, query);
                 if (ids.length > 0) {
                     setAnkiStatusByEntry((prev) => ({
@@ -3934,7 +4084,16 @@ export const AnimeVideoPlayer = ({
                 }));
             }
         },
-        [ankiTargetField, settings.ankiCheckDuplicates, settings.ankiConnectEnabled, settings.ankiConnectUrl, settings.ankiDeck],
+        [
+            ankiTargetField,
+            settings.ankiCheckDuplicates,
+            settings.ankiCheckDuplicatesAllModels,
+            settings.ankiConnectEnabled,
+            settings.ankiConnectUrl,
+            settings.ankiDeck,
+            settings.ankiDuplicateScope,
+            settings.ankiModel,
+        ],
     );
 
     useEffect(() => {
@@ -4105,6 +4264,13 @@ export const AnimeVideoPlayer = ({
             if (ankiActionPendingRef.current[entryKey]) {
                 return;
             }
+            const duplicateAction = getAnkiDuplicateAction({
+                ankiDuplicateAction: settings.ankiDuplicateAction,
+            });
+            const existingStatus = ankiStatusByEntry[entryKey];
+            const isDuplicate = existingStatus?.status === 'exists';
+            const existingNoteId = existingStatus?.noteId ?? null;
+            const actionLabel = isDuplicate && duplicateAction === 'overwrite' ? 'update' : 'add';
             ankiActionPendingRef.current[entryKey] = true;
             setAnkiStatusByEntry((prev) => ({
                 ...prev,
@@ -4118,7 +4284,11 @@ export const AnimeVideoPlayer = ({
                     timeoutId = window.setTimeout(() => resolve({ type: 'timeout' }), timeoutMs);
                 });
                 const result = await Promise.race([
-                    addNoteToAnki(entry)
+                    addNoteToAnki(entry, {
+                        isDuplicate,
+                        duplicateAction,
+                        updateExistingNoteId: existingNoteId,
+                    })
                         .then((value) => ({ type: 'value' as const, value }))
                         .catch((error) => ({ type: 'error' as const, error })),
                     timeoutPromise,
@@ -4128,19 +4298,23 @@ export const AnimeVideoPlayer = ({
                 }
 
                 if (result.type === 'timeout') {
-                    makeToast('Anki add timed out.', 'warning');
+                    makeToast(`Anki ${actionLabel} timed out.`, 'warning');
                     setAnkiStatusByEntry((prev) => ({
                         ...prev,
-                        [entryKey]: { status: 'missing', noteId: null },
+                        [entryKey]: isDuplicate
+                            ? { status: 'exists', noteId: existingNoteId }
+                            : { status: 'missing', noteId: null },
                     }));
                     return;
                 }
                 if (result.type === 'error') {
-                    console.error('[AnimeVideoPlayer] Failed to add note', result.error);
-                    makeToast('Failed to add Anki card', 'error', result.error?.message ?? String(result.error));
+                    console.error(`[AnimeVideoPlayer] Failed to ${actionLabel} note`, result.error);
+                    makeToast(`Failed to ${actionLabel} Anki card`, 'error', result.error?.message ?? String(result.error));
                     setAnkiStatusByEntry((prev) => ({
                         ...prev,
-                        [entryKey]: { status: 'missing', noteId: null },
+                        [entryKey]: isDuplicate
+                            ? { status: 'exists', noteId: existingNoteId }
+                            : { status: 'missing', noteId: null },
                     }));
                     return;
                 }
@@ -4154,7 +4328,9 @@ export const AnimeVideoPlayer = ({
                 } else {
                     setAnkiStatusByEntry((prev) => ({
                         ...prev,
-                        [entryKey]: { status: 'missing', noteId: null },
+                        [entryKey]: isDuplicate
+                            ? { status: 'exists', noteId: existingNoteId }
+                            : { status: 'missing', noteId: null },
                     }));
                 }
             } finally {
@@ -4163,11 +4339,20 @@ export const AnimeVideoPlayer = ({
             }
         },
         [
+            ankiStatusByEntry,
             addNoteToAnki,
+            settings.ankiDuplicateAction,
             settings.ankiFieldMap,
             setAnkiActionPending,
             setAnkiStatusByEntry,
         ],
+    );
+
+    const handleAnkiOverwrite = useCallback(
+        async (entry: DictionaryResult) => {
+            await handleAnkiAdd(entry);
+        },
+        [handleAnkiAdd],
     );
 
     const handleAnkiReplaceLast = useCallback(
@@ -4266,6 +4451,17 @@ export const AnimeVideoPlayer = ({
     const isFullHeight = fillHeight || isPageFullscreen;
     const wrapperFixed = isPageFullscreen || (fillHeight && isMobile);
     const wrapperFullBleed = isFullHeight;
+    const getWrapperHeight = (fixedHeight: string) => {
+        if (wrapperFixed) {
+            return fixedHeight;
+        }
+        if (wrapperFullBleed) {
+            return '100%';
+        }
+        return 'auto';
+    };
+    const wrapperHeight = getWrapperHeight('100dvh');
+    const wrapperLegacyHeight = getWrapperHeight('100vh');
     const isTapZoneActive = isMobile && !dictionaryVisible && !isOverlayVisible;
     const tapZonePercentRaw = Number.isFinite(settings.tapZonePercent) ? settings.tapZonePercent : 30;
     const tapZonePercent = Math.min(Math.max(tapZonePercentRaw, 10), 60);
@@ -4855,7 +5051,9 @@ export const AnimeVideoPlayer = ({
                 position: wrapperFixed ? 'fixed' : 'relative',
                 inset: wrapperFixed ? 0 : 'auto',
                 width: '100%',
-                height: wrapperFullBleed ? '100%' : 'auto',
+                height: wrapperHeight,
+                minHeight: wrapperFixed ? '100dvh' : undefined,
+                maxHeight: wrapperFixed ? '100dvh' : undefined,
                 backgroundColor: 'black',
                 borderRadius: wrapperFullBleed ? 0 : 1,
                 overflow: 'hidden',
@@ -4867,6 +5065,25 @@ export const AnimeVideoPlayer = ({
                     ? 'env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)'
                     : 0,
                 boxSizing: 'border-box',
+                '@supports not (height: 100dvh)': {
+                    height: wrapperLegacyHeight,
+                    minHeight: wrapperFixed ? '100vh' : undefined,
+                    maxHeight: wrapperFixed ? '100vh' : undefined,
+                },
+                '&:fullscreen': {
+                    width: '100vw',
+                    height: '100dvh',
+                    minHeight: '100dvh',
+                    maxHeight: '100dvh',
+                    backgroundColor: 'black',
+                },
+                '&:-webkit-full-screen': {
+                    width: '100vw',
+                    height: '100dvh',
+                    minHeight: '100dvh',
+                    maxHeight: '100dvh',
+                    backgroundColor: 'black',
+                },
             }}
             onClick={() => {
                 if (swipeConsumedRef.current) {
@@ -5238,7 +5455,9 @@ export const AnimeVideoPlayer = ({
                                                             );
                                                         }
                                                         const status = getAnkiEntryStatus(entry);
-                                                        if (status === 'exists') {
+                                                        const duplicateAction = getAnkiDuplicateAction(settings);
+                                                        const buttonMode = getAnkiDuplicateButtonMode(status, duplicateAction);
+                                                        if (buttonMode === 'open-existing') {
                                                             return (
                                                                 <IconButton
                                                                     size="small"
@@ -5247,14 +5466,14 @@ export const AnimeVideoPlayer = ({
                                                                         handleAnkiOpen(entry);
                                                                     }}
                                                                     title="Open in Anki"
-                                                                    sx={{ color: '#2ecc71' }}
+                                                                    sx={{ color: '#f1c40f' }}
                                                                     aria-label="Open in Anki"
                                                                 >
                                                                     <MenuBookIcon sx={{ fontSize: 22, transform: 'translateY(-0.5px)' }} />
                                                                 </IconButton>
                                                             );
                                                         }
-                                                        if (status === 'missing') {
+                                                        if (buttonMode === 'add' || buttonMode === 'add-duplicate') {
                                                             return (
                                                                 <IconButton
                                                                     size="small"
@@ -5262,20 +5481,40 @@ export const AnimeVideoPlayer = ({
                                                                         event.stopPropagation();
                                                                         handleAnkiAdd(entry);
                                                                     }}
-                                                                    title="Add to Anki"
+                                                                    title={buttonMode === 'add-duplicate' ? 'Add duplicate to Anki' : 'Add to Anki'}
                                                                     sx={{ color: '#2ecc71' }}
-                                                                    aria-label="Add to Anki"
+                                                                    aria-label={buttonMode === 'add-duplicate' ? 'Add duplicate to Anki' : 'Add to Anki'}
                                                                 >
-                                                                    <AddCircleOutlineIcon
-                                                                        sx={{
-                                                                            fontSize: 22,
-                                                                            '& path': {
-                                                                                transform: 'scale(0.9167)',
-                                                                                transformOrigin: 'center',
-                                                                                transformBox: 'fill-box',
-                                                                            },
-                                                                        }}
-                                                                    />
+                                                                    {buttonMode === 'add-duplicate' ? (
+                                                                        <AddIcon sx={{ fontSize: 22 }} />
+                                                                    ) : (
+                                                                        <AddCircleOutlineIcon
+                                                                            sx={{
+                                                                                fontSize: 22,
+                                                                                '& path': {
+                                                                                    transform: 'scale(0.9167)',
+                                                                                    transformOrigin: 'center',
+                                                                                    transformBox: 'fill-box',
+                                                                                },
+                                                                            }}
+                                                                        />
+                                                                    )}
+                                                                </IconButton>
+                                                            );
+                                                        }
+                                                        if (buttonMode === 'overwrite') {
+                                                            return (
+                                                                <IconButton
+                                                                    size="small"
+                                                                    onClick={(event) => {
+                                                                        event.stopPropagation();
+                                                                        handleAnkiOverwrite(entry);
+                                                                    }}
+                                                                    title="Overwrite in Anki"
+                                                                    sx={{ color: '#3498db' }}
+                                                                    aria-label="Overwrite in Anki"
+                                                                >
+                                                                    <SystemUpdateAltIcon sx={{ fontSize: 22 }} />
                                                                 </IconButton>
                                                             );
                                                         }
@@ -5490,13 +5729,13 @@ export const AnimeVideoPlayer = ({
                                 <IconButton
                                     onClick={(event) => {
                                         event.stopPropagation();
-                                        void toggleFullscreen();
+                                        toggleFullscreen().catch(() => undefined);
                                     }}
                                     color="inherit"
-                                    aria-label={isPageFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
-                                    title={isPageFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+                                    aria-label={fullscreenButtonLabel}
+                                    title={fullscreenButtonLabel}
                                 >
-                                    {isPageFullscreen ? <FullscreenExitIcon /> : <FullscreenIcon />}
+                                    {isFullscreenActive ? <FullscreenExitIcon /> : <FullscreenIcon />}
                                 </IconButton>
                             )}
                         </Stack>

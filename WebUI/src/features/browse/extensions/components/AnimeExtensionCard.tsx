@@ -28,12 +28,15 @@ import {
     InstalledStates,
 } from '@/features/extension/Extensions.types.ts';
 import {
+    EXTENSION_ACTION_TO_FAILURE_TRANSLATION_KEY_MAP,
     EXTENSION_ACTION_TO_NEXT_ACTION_MAP,
     EXTENSION_ACTION_TO_STATE_MAP,
     INSTALLED_STATE_TO_TRANSLATION_KEY_MAP,
 } from '@/features/extension/Extensions.constants.ts';
 import { getInstalledState } from '@/features/extension/Extensions.utils.ts';
 import { languageCodeToName } from '@/base/utils/Languages.ts';
+import { makeToast } from '@/base/utils/Toast.ts';
+import { getErrorMessage } from '@/lib/HelperFunctions.ts';
 
 export type AnimeExtensionInfo = {
     repo: string | null;
@@ -91,8 +94,13 @@ export function AnimeExtensionCard(props: AnimeExtensionCardProps) {
             await requestManager.updateAnimeExtension(pkgName, patch).response;
             setInstalledState(nextAction);
             handleUpdate();
-        } catch (_) {
+        } catch (e) {
             setInstalledState(getInstalledState(installed, obsolete, hasUpdate));
+            makeToast(
+                t(EXTENSION_ACTION_TO_FAILURE_TRANSLATION_KEY_MAP[action], { count: 1 }),
+                'error',
+                getErrorMessage(e),
+            );
         }
     };
 

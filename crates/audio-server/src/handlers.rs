@@ -42,6 +42,21 @@ pub struct AudioClipQuery {
     pub end: f64,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VideoSourceResponse {
+    #[serde(default)]
+    proxy_url: Option<String>,
+    #[serde(default)]
+    video_url: Option<String>,
+    #[serde(default)]
+    ffmpeg_source_url: Option<String>,
+    #[serde(default)]
+    is_hls: Option<bool>,
+    #[serde(default)]
+    container_hint: Option<String>,
+}
+
 #[derive(Clone)]
 struct SegmentSelection {
     url: Url,
@@ -146,13 +161,16 @@ async fn build_audio_clip(
     duration: f64,
 ) -> anyhow::Result<Vec<u8>> {
     let target_end = start + duration;
-    let playlist_url = format!(
-        "{}/api/v1/anime/{anime_id}/episode/{episode_index}/video/{video_index}/playlist",
-        state.suwayomi_base_url
-    );
-    let playlist_url = Url::parse(&playlist_url).context("Invalid playlist URL")?;
     let client = Client::new();
-    let (playlist, base_url) = fetch_media_playlist(&client, headers, playlist_url).await?;
+    let (playlist, base_url) = fetch_media_playlist_for_clip(
+        &client,
+        headers,
+        &state.suwayomi_base_url,
+        anime_id,
+        episode_index,
+        video_index,
+    )
+    .await?;
     let segments = select_segments(&playlist, &base_url, start, target_end)?;
     if segments.is_empty() {
         return Err(anyhow!("No matching segments found"));
@@ -214,6 +232,184 @@ async fn build_audio_clip(
     }
 
     encode_wav_i16(&output_samples, sample_rate, channels as u16)
+}
+
+async fn fetch_media_playlist_for_clip(
+    client: &Client,
+    headers: &HeaderMap,
+    suwayomi_base_url: &str,
+    anime_id: i64,
+    episode_index: i64,
+    video_index: i64,
+) -> anyhow::Result<(MediaPlaylist<'static>, Url)> {
+    let base_url = runtime_base_url(suwayomi_base_url)?;
+    let playlist_url = clip_playlist_url(&base_url, anime_id, episode_index, video_index)?;
+    match fetch_media_playlist(client, headers, playlist_url.clone()).await {
+        Ok(playlist) => return Ok(playlist),
+        Err(err) => {
+            warn!("Canonical audio playlist request failed for {playlist_url}: {err}");
+        }
+    }
+
+    let video_sources = fetch_video_sources(client, headers, &base_url, anime_id, episode_index)
+        .await
+        .context("Failed to fetch fallback video sources")?;
+    let candidates = selected_video_playlist_urls(&video_sources, video_index, &base_url)?;
+    let mut last_error: Option<anyhow::Error> = None;
+    for candidate_url in candidates {
+        match fetch_media_playlist(client, headers, candidate_url.clone()).await {
+            Ok(playlist) => return Ok(playlist),
+            Err(err) => {
+                warn!("Fallback audio playlist request failed for {candidate_url}: {err}");
+                last_error = Some(err);
+            }
+        }
+    }
+
+    match last_error {
+        Some(err) => Err(err).context("No selected video fallback playlist could be fetched"),
+        None => Err(anyhow!(
+            "No HLS fallback playlist found for selected video source"
+        )),
+    }
+}
+
+fn clip_playlist_url(
+    base_url: &Url,
+    anime_id: i64,
+    episode_index: i64,
+    video_index: i64,
+) -> anyhow::Result<Url> {
+    runtime_url(
+        base_url,
+        &format!("api/v1/anime/{anime_id}/episode/{episode_index}/video/{video_index}/playlist"),
+    )
+    .context("Invalid playlist URL")
+}
+
+async fn fetch_video_sources(
+    client: &Client,
+    headers: &HeaderMap,
+    base_url: &Url,
+    anime_id: i64,
+    episode_index: i64,
+) -> anyhow::Result<Vec<VideoSourceResponse>> {
+    let sources_url = runtime_url(
+        base_url,
+        &format!("api/v1/anime/{anime_id}/episode/{episode_index}/videos"),
+    )
+    .context("Invalid video sources URL")?;
+    let response = apply_forward_headers(client.get(sources_url.clone()), headers)
+        .send()
+        .await
+        .context("Video sources request failed")?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(anyhow!(
+            "Video sources request returned status {status} for {sources_url}"
+        ));
+    }
+    response
+        .json::<Vec<VideoSourceResponse>>()
+        .await
+        .context("Failed to read video sources")
+}
+
+fn selected_video_playlist_urls(
+    sources: &[VideoSourceResponse],
+    video_index: i64,
+    base_url: &Url,
+) -> anyhow::Result<Vec<Url>> {
+    let Ok(video_index) = usize::try_from(video_index) else {
+        return Err(anyhow!("Selected video index {video_index} is invalid"));
+    };
+    let Some(source) = sources.get(video_index) else {
+        return Err(anyhow!("Selected video index {video_index} is missing"));
+    };
+
+    let mut candidates = Vec::new();
+    push_hls_candidate(
+        &mut candidates,
+        base_url,
+        source.proxy_url.as_deref(),
+        source,
+        true,
+    );
+    push_hls_candidate(
+        &mut candidates,
+        base_url,
+        source.video_url.as_deref(),
+        source,
+        true,
+    );
+    push_hls_candidate(
+        &mut candidates,
+        base_url,
+        source.ffmpeg_source_url.as_deref(),
+        source,
+        false,
+    );
+    Ok(candidates)
+}
+
+fn push_hls_candidate(
+    candidates: &mut Vec<Url>,
+    base_url: &Url,
+    candidate: Option<&str>,
+    source: &VideoSourceResponse,
+    allow_source_hls_hint: bool,
+) {
+    let Some(candidate) = candidate
+        .map(str::trim)
+        .filter(|candidate| !candidate.is_empty())
+    else {
+        return;
+    };
+    if !is_hls_candidate(candidate, source, allow_source_hls_hint) {
+        return;
+    }
+    let Ok(url) = resolve_url(base_url, candidate) else {
+        return;
+    };
+    if !candidates.iter().any(|existing| existing == &url) {
+        candidates.push(url);
+    }
+}
+
+fn is_hls_candidate(
+    candidate: &str,
+    source: &VideoSourceResponse,
+    allow_source_hls_hint: bool,
+) -> bool {
+    if allow_source_hls_hint && source.is_hls.unwrap_or(false) {
+        return true;
+    }
+    if allow_source_hls_hint
+        && source.container_hint.as_deref().is_some_and(|hint| {
+            let hint = hint.to_ascii_lowercase();
+            hint.contains("hls") || hint.contains("m3u8")
+        })
+    {
+        return true;
+    }
+    let candidate = candidate
+        .split_once('?')
+        .map_or(candidate, |(path, _)| path)
+        .to_ascii_lowercase();
+    candidate.ends_with(".m3u8") || candidate.contains(".m3u8/") || candidate.contains("/playlist")
+}
+
+fn runtime_base_url(base_url: &str) -> anyhow::Result<Url> {
+    let mut parsed = Url::parse(base_url).context("Invalid runtime base URL")?;
+    if !parsed.path().ends_with('/') {
+        let path = format!("{}/", parsed.path().trim_end_matches('/'));
+        parsed.set_path(&path);
+    }
+    Ok(parsed)
+}
+
+fn runtime_url(base_url: &Url, path: &str) -> anyhow::Result<Url> {
+    resolve_url(base_url, path.trim_start_matches('/'))
 }
 
 async fn fetch_media_playlist(
@@ -383,9 +579,13 @@ async fn fetch_text(client: &Client, headers: &HeaderMap, url: &Url) -> anyhow::
     let response = apply_forward_headers(client.get(url.clone()), headers)
         .send()
         .await
-        .context("Playlist request failed")?
-        .error_for_status()
-        .context("Playlist request returned error status")?;
+        .context("Playlist request failed")?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(anyhow!(
+            "Playlist request returned status {status} for {url}"
+        ));
+    }
     response.text().await.context("Failed to read playlist")
 }
 
@@ -939,5 +1139,135 @@ fn prepare_segment_audio(data: Vec<u8>, hint_extension: Option<String>) -> Prepa
         hint_extension,
         first_pts: None,
         force_segment_start: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderMap;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
+    const MEDIA_PLAYLIST: &str = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nsegment0.ts\n#EXT-X-ENDLIST\n";
+
+    async fn spawn_playlist_fallback_server() -> Url {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut buffer = [0; 4096];
+                    let Ok(bytes_read) = socket.read(&mut buffer).await else {
+                        return;
+                    };
+                    let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+                    let path = request
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("/");
+                    let (status, content_type, body) = match path {
+                        "/api/v1/anime/12/episode/3/video/0/playlist" => {
+                            ("404 Not Found", "text/plain", "missing".to_string())
+                        }
+                        "/api/v1/anime/12/episode/3/videos" => (
+                            "200 OK",
+                            "application/json",
+                            r#"[{"proxyUrl":"/local-source/episode/master.m3u8","isHls":true}]"#
+                                .to_string(),
+                        ),
+                        "/local-source/episode/master.m3u8" => (
+                            "200 OK",
+                            "application/vnd.apple.mpegurl",
+                            MEDIA_PLAYLIST.to_string(),
+                        ),
+                        _ => ("404 Not Found", "text/plain", "not found".to_string()),
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.as_bytes().len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        Url::parse(&format!("http://{addr}")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn fetch_media_playlist_for_clip_uses_selected_video_hls_when_canonical_playlist_404() {
+        let base_url = spawn_playlist_fallback_server().await;
+        let client = Client::new();
+        let headers = HeaderMap::new();
+
+        let (playlist, playlist_url) =
+            fetch_media_playlist_for_clip(&client, &headers, base_url.as_str(), 12, 3, 0)
+                .await
+                .unwrap();
+
+        assert_eq!(playlist_url.path(), "/local-source/episode/master.m3u8");
+        assert_eq!(playlist.segments.iter().count(), 1);
+    }
+
+    #[test]
+    fn selected_video_playlist_urls_prefers_proxy_then_video_then_ffmpeg_sources() {
+        let base_url = Url::parse("http://127.0.0.1:3000/").unwrap();
+        let sources = vec![VideoSourceResponse {
+            proxy_url: Some("/proxy/playlist".to_string()),
+            video_url: Some("https://cdn.example.test/video/playlist".to_string()),
+            ffmpeg_source_url: Some("/ffmpeg/master.m3u8".to_string()),
+            is_hls: Some(false),
+            container_hint: None,
+        }];
+
+        let urls = selected_video_playlist_urls(&sources, 0, &base_url).unwrap();
+        let url_strings = urls.iter().map(Url::as_str).collect::<Vec<_>>();
+
+        assert_eq!(
+            url_strings,
+            vec![
+                "http://127.0.0.1:3000/proxy/playlist",
+                "https://cdn.example.test/video/playlist",
+                "http://127.0.0.1:3000/ffmpeg/master.m3u8",
+            ]
+        );
+    }
+
+    #[test]
+    fn selected_video_playlist_urls_ignores_non_hls_sources_without_hls_hint() {
+        let base_url = Url::parse("http://127.0.0.1:3000/").unwrap();
+        let sources = vec![VideoSourceResponse {
+            proxy_url: Some("/proxy/video.mp4".to_string()),
+            video_url: Some("https://cdn.example.test/video.mp4".to_string()),
+            ffmpeg_source_url: None,
+            is_hls: Some(false),
+            container_hint: None,
+        }];
+
+        let urls = selected_video_playlist_urls(&sources, 0, &base_url).unwrap();
+
+        assert!(urls.is_empty());
+    }
+
+    #[test]
+    fn selected_video_playlist_urls_does_not_apply_source_hls_hint_to_ffmpeg_source() {
+        let base_url = Url::parse("http://127.0.0.1:3000/").unwrap();
+        let sources = vec![VideoSourceResponse {
+            proxy_url: None,
+            video_url: None,
+            ffmpeg_source_url: Some("/ffmpeg/video.mp4".to_string()),
+            is_hls: Some(true),
+            container_hint: Some("hls".to_string()),
+        }];
+
+        let urls = selected_video_playlist_urls(&sources, 0, &base_url).unwrap();
+
+        assert!(urls.is_empty());
     }
 }

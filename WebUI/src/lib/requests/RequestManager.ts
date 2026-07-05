@@ -707,7 +707,10 @@ export class RequestManager {
 
     private mergeInstalledExtensionState(availableExtensions: any[], runtimeExtensions: any[]) {
         const isInstalledExtension = (extension: any) =>
-            extension?.isInstalled === true || extension?.installed === true || !!extension?.jarPath;
+            extension?.isInstalled === true ||
+            extension?.installed === true ||
+            extension?.is_installed === true ||
+            !!extension?.jarPath;
         const keyFor = (extension: any) => extension?.pkgName || extension?.apkName || '';
         const installedExtensions = runtimeExtensions.filter(isInstalledExtension);
         const installedByKey = new Map(installedExtensions.map((extension) => [keyFor(extension), extension]));
@@ -953,8 +956,11 @@ export class RequestManager {
                     normalized: this.normalizeSourceMangaPayload(manga, sourceId),
                 };
             })
-            .filter(({ rawSourceId }) => rawSourceId != null && `${rawSourceId}` === expectedSourceId)
-            .map(({ normalized }) => normalized);
+            .filter(
+                ({ rawSourceId }: { rawSourceId: unknown; normalized: any }) =>
+                    rawSourceId != null && `${rawSourceId}` === expectedSourceId,
+            )
+            .map(({ normalized }: { rawSourceId: unknown; normalized: any }) => normalized);
         return {
             fetchSourceManga: {
                 mangas: normalized,
@@ -1007,8 +1013,11 @@ export class RequestManager {
                     normalized: this.normalizeSourceAnimePayload(anime, sourceId),
                 };
             })
-            .filter(({ rawSourceId }) => rawSourceId != null && `${rawSourceId}` === expectedSourceId)
-            .map(({ normalized }) => normalized);
+            .filter(
+                ({ rawSourceId }: { rawSourceId: unknown; normalized: any }) =>
+                    rawSourceId != null && `${rawSourceId}` === expectedSourceId,
+            )
+            .map(({ normalized }: { rawSourceId: unknown; normalized: any }) => normalized);
         return {
             fetchSourceAnime: {
                 animes: normalized,

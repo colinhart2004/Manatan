@@ -1509,6 +1509,7 @@ fn main() -> eframe::Result<()> {
                 shutdown_requested,
                 host,
                 port,
+                scheme,
             )))
         }),
     );
@@ -1541,6 +1542,7 @@ struct MyApp {
     shutdown_requested: Arc<AtomicBool>,
     host: Ipv4Addr,
     port: u16,
+    scheme: &'static str,
 }
 
 impl MyApp {
@@ -1551,6 +1553,7 @@ impl MyApp {
         shutdown_requested: Arc<AtomicBool>,
         host: Ipv4Addr,
         port: u16,
+        scheme: &'static str,
     ) -> Self {
         // Initialize status
         let update_status = Arc::new(Mutex::new(UpdateStatus::Idle));
@@ -1572,6 +1575,7 @@ impl MyApp {
             shutdown_requested,
             host,
             port,
+            scheme,
         }
     }
 
@@ -1749,7 +1753,7 @@ impl eframe::App for MyApp {
                     } else {
                         self.host.to_string()
                     };
-                    let url = format!("http://{host_target}:{}", self.port);
+                    let url = format!("{}://{host_target}:{}", self.scheme, self.port);
                     let _ = open::that(url);
                 }
             });

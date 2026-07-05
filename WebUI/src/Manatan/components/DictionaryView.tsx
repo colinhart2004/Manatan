@@ -35,6 +35,11 @@ import {
     renderAnkiPitchAccentCategories,
     renderAnkiPitchAccentPositions,
 } from '@/Manatan/utils/pitchAccentExport';
+import {
+    getAnkiAddNoteOptions,
+    getAnkiDuplicateAction,
+    getAnkiDuplicateButtonMode,
+} from '@/Manatan/utils/ankiDuplicateAction';
 import { DictionaryResult, WordAudioSource, WordAudioSourceSelection } from '@/Manatan/types';
 import { PronunciationSection, extractPronunciationData } from './Pronunciation';
 import { PopupTheme } from '@/features/ln/reader/utils/themes';
@@ -455,9 +460,9 @@ const AnkiButtons: React.FC<{
         if (settings.ankiEnableCropper && hasImageField && dictPopup.context?.imgSrc) {
             setShowCropper(true);
         } else {
-            const isExists = status === 'exists';
-            const action = settings.ankiDuplicateAction || 'prevent';
-            if (isExists && action === 'overwrite') {
+            const action = getAnkiDuplicateAction(settings);
+            const buttonMode = getAnkiDuplicateButtonMode(status, action);
+            if (buttonMode === 'overwrite') {
                 handleOverwrite();
             } else {
                 addNoteToAnki();
@@ -739,8 +744,7 @@ const AnkiButtons: React.FC<{
             setStatus('loading');
             const { fields, pictureData, wordAudioData } = await prepareNoteData(croppedBase64);
 
-            const isExists = status === 'exists';
-            const action = settings.ankiDuplicateAction || 'prevent';
+            const action = getAnkiDuplicateAction(settings);
 
             const res = await addNote(
                 url,
@@ -750,10 +754,11 @@ const AnkiButtons: React.FC<{
                 ['manatan'],
                 pictureData,
                 wordAudioData,
-                {
-                    allowDuplicate: isExists && action === 'add',
-                    duplicateScope: settings.ankiDuplicateScope || 'deck'
-                }
+                getAnkiAddNoteOptions({
+                    isDuplicate: status === 'exists',
+                    action,
+                    duplicateScope: settings.ankiDuplicateScope,
+                })
             );
             if (res) {
                 setStatus('exists');
@@ -822,11 +827,13 @@ const AnkiButtons: React.FC<{
     };
     if (status === 'unknown') return null;
     const isExists = status === 'exists';
-    const action = settings.ankiDuplicateAction || 'prevent';
+    const action = getAnkiDuplicateAction(settings);
+    const buttonMode = getAnkiDuplicateButtonMode(status, action);
+    const canAddOrUpdate = buttonMode === 'add' || buttonMode === 'add-duplicate' || buttonMode === 'overwrite';
 
     const onCropperComplete = (b64: string) => {
         setShowCropper(false);
-        if (isExists && action === 'overwrite') {
+        if (buttonMode === 'overwrite') {
             handleOverwrite(b64);
         } else {
             addNoteToAnki(b64);
@@ -835,20 +842,20 @@ const AnkiButtons: React.FC<{
 
     return (
         <div style={{ display: 'inline-flex', alignItems: 'center' }}>
-            {(!isExists || action === 'add' || action === 'overwrite') && (
+            {canAddOrUpdate && (
                 <button
                     onClick={handleAddClick}
                     disabled={status === 'loading'}
                     style={{
                         background: 'none', border: 'none', cursor: 'pointer', padding: '2px',
                         display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                        lineHeight: 1, color: isExists && action === 'overwrite' ? '#3498db' : '#2ecc71', opacity: status === 'loading' ? 0.5 : 1, marginInlineStart: '10px'
+                        lineHeight: 1, color: buttonMode === 'overwrite' ? '#3498db' : '#2ecc71', opacity: status === 'loading' ? 0.5 : 1, marginInlineStart: '10px'
                     }}
-                    title={isExists && action === 'overwrite' ? "Overwrite in Anki" : (isExists && action === 'add' ? "Add Duplicate to Anki" : "Add to Anki")}
+                    title={buttonMode === 'overwrite' ? "Overwrite in Anki" : (buttonMode === 'add-duplicate' ? "Add Duplicate to Anki" : "Add to Anki")}
                 >
-                    {isExists && action === 'overwrite' ? (
+                    {buttonMode === 'overwrite' ? (
                         <SystemUpdateAltIcon sx={{ fontSize: 22 }} />
-                    ) : (isExists && action === 'add' ? (
+                    ) : (buttonMode === 'add-duplicate' ? (
                         <AddIcon sx={{ fontSize: 22 }} />
                     ) : (
                         <AddCircleOutlineIcon sx={{ fontSize: 22, '& path': { transform: 'scale(0.9167)', transformOrigin: 'center', transformBox: 'fill-box' } }} />
@@ -859,11 +866,10 @@ const AnkiButtons: React.FC<{
             {isExists && (
                 <button
                     onClick={handleOpen}
-                    disabled={status === 'loading'}
                     style={{
                         background: 'none', border: 'none', cursor: 'pointer', padding: '2px',
                         display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                        lineHeight: 1, color: '#f1c40f', opacity: status === 'loading' ? 0.5 : 1, marginInlineStart: (action === 'prevent' ? '10px' : '4px')
+                        lineHeight: 1, color: '#f1c40f', marginInlineStart: (buttonMode === 'open-existing' ? '10px' : '4px')
                     }}
                     title="Open in Anki"
                 >

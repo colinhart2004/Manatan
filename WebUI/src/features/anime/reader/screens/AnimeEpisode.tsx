@@ -625,7 +625,6 @@ export const AnimeEpisode = () => {
             title={episodeTitle}
             animeId={id ?? 'unknown'}
             fillHeight
-            showFullscreenButton={!isMobile}
             statusMessage={playerStatusMessage}
             onExit={() => {
                 if (id) {
